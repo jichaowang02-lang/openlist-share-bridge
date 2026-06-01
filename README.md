@@ -6,7 +6,7 @@ Paste a cloud-drive share link, bridge it into OpenList, download it from your o
 
 OpenList Share Bridge is a lightweight self-hosted helper for people who already use [OpenList](https://github.com/OpenListTeam/OpenList). It currently focuses on Baidu Netdisk shares: submit a Baidu share URL and extraction code, the service transfers the shared files into a temporary Baidu Netdisk folder, exposes a download flow through OpenList, and deletes the temporary folder after success or failure.
 
-> Early-stage project. Baidu Netdisk is implemented first; the internal flow is intentionally shaped so other cloud drives can be added later.
+> Baidu Netdisk is implemented first. The project is expected to evolve toward a multi-provider adapter model.
 
 ## Features
 
@@ -18,73 +18,187 @@ OpenList Share Bridge is a lightweight self-hosted helper for people who already
 - Builds ZIP files in the background for small folders, with a progress page.
 - Refuses to server-side ZIP folders larger than `15GB` by default to avoid filling your VPS disk.
 - Deletes temporary Baidu folders on success, failure, interruption, and ZIP preparation failure.
-- Provides a simple token-protected web UI that can be reverse-proxied under a path such as `/baidu/`.
+- Provides a token-protected web UI that can be reverse-proxied under a path such as `/baidu/`.
 
-## How It Works
+## Installation Paths
 
-1. A user submits a Baidu Netdisk share link and extraction code.
-2. The service verifies the share with a browser cookie from your own Baidu account.
-3. The shared files are transferred into `/__openlist_tmp/{jobId}`.
-4. OpenList sees the temporary folder through your existing Baidu mount.
-5. The service downloads through OpenList's API and streams the file to the browser.
-6. The temporary Baidu folder is deleted after the task finishes, even if the task fails.
+### Option 1: Fresh Server, Install OpenList + Bridge
 
+Use this when the server does not have OpenList yet.
 
-## Requirements
+Recommended OS: Ubuntu 22.04 or 24.04.
 
-- Linux server with Python 3.10+
-- OpenList already running
-- A Baidu Netdisk mount configured in OpenList
-- BaiduPCS-Go available at `bin/BaiduPCS-Go`
-- A valid Baidu browser cookie saved outside Git
-- OpenList admin token
-- Nginx, Caddy, or another reverse proxy if exposing the UI publicly
+```bash
+git clone https://github.com/jichaowang02-lang/openlist-share-bridge.git
+cd openlist-share-bridge
+sudo bash scripts/install-fresh.sh
+```
+
+The script installs:
+
+- Python 3
+- Nginx
+- Docker
+- OpenList Docker container
+- BaiduPCS-Go
+- OpenList Share Bridge
+- systemd service
+- Nginx reverse proxy config
+
+After installation, you still need to:
+
+1. Open OpenList, add a Baidu Netdisk storage, and mount it at `/baidu`.
+2. Put the OpenList admin token in `/opt/openlist-share-bridge/baidu-openlist.env`.
+3. Put a valid Baidu browser Cookie in `/opt/openlist-share-bridge/browser_cookie.txt`.
+
+If this is a new OpenList container, get the initial admin information with:
+
+```bash
+sudo docker logs openlist | grep -i -E 'password|token|admin' | tail -20
+```
+
+Then restart the service:
+
+```bash
+sudo systemctl restart baidu-openlist.service
+```
+
+### Option 2: Existing OpenList, Install Bridge Only
+
+Use this when OpenList is already running and Baidu Netdisk is already mounted.
+
+Recommended OS: Ubuntu 22.04 or 24.04.
+
+```bash
+git clone https://github.com/jichaowang02-lang/openlist-share-bridge.git
+cd openlist-share-bridge
+sudo bash scripts/install-bridge-only.sh
+```
+
+Check these assumptions:
+
+- OpenList API defaults to `http://127.0.0.1:5244/openlist`.
+- Baidu Netdisk is mounted at `/baidu` in OpenList.
+- If your paths differ, edit `/opt/openlist-share-bridge/baidu-openlist.env`.
+
+## Non-Interactive Install
+
+Fresh server:
+
+```bash
+sudo env PUBLIC_URL=https://drive.example.com \
+  SERVER_NAME=drive.example.com \
+  OPENLIST_ADMIN_TOKEN=your-openlist-admin-token \
+  UI_TOKEN=change-this-ui-token \
+  bash scripts/install-fresh.sh
+```
+
+Existing OpenList:
+
+```bash
+sudo env PUBLIC_URL=https://drive.example.com \
+  SERVER_NAME=drive.example.com \
+  OPENLIST_ADMIN_TOKEN=your-openlist-admin-token \
+  UI_TOKEN=change-this-ui-token \
+  BAIDU_MOUNT=/baidu \
+  bash scripts/install-bridge-only.sh
+```
+
+Common environment variables:
+
+- `PUBLIC_URL`: public base URL, for example `https://drive.example.com`
+- `SERVER_NAME`: Nginx `server_name`
+- `UI_TOKEN`: Bridge web UI token
+- `OPENLIST_ADMIN_TOKEN`: OpenList admin token
+- `BAIDU_MOUNT`: Baidu mount path in OpenList, default `/baidu`
+- `APP_DIR`: install directory, default `/opt/openlist-share-bridge`
+- `OPENLIST_PORT`: local OpenList port, default `5244`
+- `BRIDGE_PORT`: local Bridge port, default `9801`
+- `ZIP_LIMIT_BYTES`: server ZIP limit, default `16106127360` or 15 GiB
 
 ## Configuration
 
-Copy the example env file:
+Main config:
 
 ```bash
-cp baidu-openlist.env.example baidu-openlist.env
+/opt/openlist-share-bridge/baidu-openlist.env
 ```
 
-Edit `baidu-openlist.env`:
+Example:
 
 ```env
 BAIDU_OPENLIST_PORT=9801
 BAIDU_OPENLIST_TTL_SECONDS=86400
 BAIDU_OPENLIST_TOKEN=change-this-ui-token
 BAIDU_OPENLIST_BASE_PATH=/baidu
+GODEBUG=http2client=0,netdns=cgo+1
+BAIDU_OPENLIST_FORCE_IPV4=1
 BAIDU_OPENLIST_MOUNT=/baidu
-BAIDU_OPENLIST_SITE_URL=https://your-domain.example/openlist
+BAIDU_OPENLIST_SITE_URL=https://drive.example.com/openlist
 BAIDU_OPENLIST_ADMIN_TOKEN=change-this-openlist-admin-token
 BAIDU_OPENLIST_API=http://127.0.0.1:5244/openlist
 BAIDU_OPENLIST_MAX_SERVER_ZIP_BYTES=16106127360
+BAIDU_OPENLIST_PAGE_SIZE=200
 ```
 
-Save your Baidu browser cookie here:
+Baidu browser Cookie file:
 
 ```bash
-/opt/baidu-openlist/browser_cookie.txt
+/opt/openlist-share-bridge/browser_cookie.txt
 ```
 
 Do not commit real environment files, browser cookies, access tokens, account credentials, or private deployment details.
 
-## Reverse Proxy
+## Nginx and HTTPS
 
-The included `nginx-baidu-location.conf` shows a path-based proxy example:
+The install scripts create an HTTP reverse proxy:
 
-```nginx
-location = /baidu {
-    return 301 /baidu/;
-}
+- Bridge: `/baidu/`
+- OpenList: `/openlist/`
 
-location /baidu/ {
-    proxy_pass http://127.0.0.1:9801/baidu/;
-}
+After DNS points to your server, enable HTTPS with:
+
+```bash
+sudo certbot --nginx -d drive.example.com
 ```
 
 For large downloads, avoid proxying the actual file stream through Cloudflare unless you know your plan and limits. The service is designed to keep the UI behind a proxy, while actual large-file strategies may need direct origin access, OpenList links, or future adapter-specific handling.
+
+## Usage
+
+1. Open the Bridge page.
+2. Paste a Baidu Netdisk share link and extraction code.
+3. The service transfers the share into `/__openlist_tmp/{jobId}`.
+4. The page shows a direct download button or an OpenList directory button.
+5. When the task succeeds, fails, or is interrupted, the service attempts to delete the temporary Baidu folder.
+
+## Troubleshooting
+
+Run the doctor script:
+
+```bash
+sudo bash scripts/doctor.sh
+```
+
+Bridge logs:
+
+```bash
+sudo journalctl -u baidu-openlist.service -f
+```
+
+OpenList logs:
+
+```bash
+sudo docker logs -f openlist
+```
+
+Common issues:
+
+- `unauthorized`: the URL is missing `?token=...`.
+- Browser downloads `.htm`: update to the latest version and submit the task again.
+- Baidu requests time out: check `GODEBUG=http2client=0,netdns=cgo+1` and `BAIDU_OPENLIST_FORCE_IPV4=1`.
+- OpenList cannot find files: make sure the OpenList Baidu mount path matches `BAIDU_OPENLIST_MOUNT`.
+- Share verification fails: the Baidu browser Cookie may be expired.
 
 ## Security Notes
 
@@ -96,17 +210,25 @@ For large downloads, avoid proxying the actual file stream through Cloudflare un
 
 ## Project Status
 
-Current adapter:
+Implemented:
 
-- Baidu Netdisk share transfer and download flow
+- Baidu Netdisk share link parsing
+- Baidu share verification and transfer
+- OpenList download URL resolution
+- Single-file download
+- Small-folder background ZIP
+- Download progress page
+- Cleanup after success or failure
+- Fresh server install script
+- Existing OpenList install script
 
-Planned direction:
+Planned:
 
-- Adapter interface for more cloud drives
+- Multi-provider adapter interface
 - Cleaner frontend separation
-- Docker packaging
-- Better job persistence and task cancellation
-- Optional direct OpenList-only mode for very large folders
+- Docker Compose deployment
+- Better job cancellation and persistence
+- OpenList-native strategy for large folders
 
 ## Disclaimer
 
