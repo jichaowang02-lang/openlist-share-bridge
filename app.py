@@ -347,10 +347,9 @@ def worker():
             save_job(job)
             openlist_path = OPENLIST_BAIDU_MOUNT.rstrip('/') + remote_dir
             openlist_url = OPENLIST_SITE_URL.rstrip('/') + openlist_path
-            transferred = job.get('transferred_files', [])
-            file_items = [x for x in transferred if isinstance(x, dict) and not x.get('is_dir')]
-            openlist_direct_urls = [OPENLIST_SITE_URL.rstrip() + '/d' + OPENLIST_BAIDU_MOUNT.rstrip('/') + urllib.parse.quote(x['path'], safe='/') for x in file_items]
-            direct_urls = [(BASE_PATH or '') + '/download/' + job_id + (('?token=' + urllib.parse.quote(TOKEN)) if TOKEN else '')] if len(file_items) == 1 else []
+            file_paths = transferred_file_paths(job)
+            openlist_direct_urls = [OPENLIST_SITE_URL.rstrip() + '/d' + OPENLIST_BAIDU_MOUNT.rstrip('/') + urllib.parse.quote(x, safe='/') for x in file_paths]
+            direct_urls = [(BASE_PATH or '') + '/download/' + job_id + (('?token=' + urllib.parse.quote(TOKEN)) if TOKEN else '')] if len(file_paths) == 1 else []
             job.update(
                 status='ready',
                 finished_at=now(),
@@ -413,14 +412,27 @@ def progress_html(job):
             f'<div class="progress-meta"><span>{label}</span><span>{current}</span></div>')
 
 
-def job_file_items(job):
+def transferred_file_paths(job):
     items = job.get('transferred_files') or []
-    return [x['path'] for x in items if isinstance(x, dict) and not x.get('is_dir')]
+    files = []
+    for item in items:
+        if isinstance(item, str) and '.' in item.rsplit('/', 1)[-1]:
+            files.append(item)
+        elif isinstance(item, dict) and not item.get('is_dir') and item.get('path'):
+            files.append(item['path'])
+    return files
+
+
+def transferred_has_dirs(job):
+    return any(isinstance(x, dict) and x.get('is_dir') for x in (job.get('transferred_files') or []))
+
+
+def job_file_items(job):
+    return transferred_file_paths(job)
 
 
 def job_has_dirs(job):
-    items = job.get('transferred_files') or []
-    return any(isinstance(x, dict) and x.get('is_dir') for x in items) or (job.get('openlist_path') and not job_file_items(job))
+    return transferred_has_dirs(job) or (job.get('openlist_path') and not job_file_items(job))
 
 
 def build_zip(job_id):
@@ -854,8 +866,7 @@ class Handler(BaseHTTPRequestHandler):
             jid = path.rsplit('/', 1)[-1]
             try:
                 job = load_job(jid)
-                items = job.get('transferred_files') or []
-                files = [x['path'] for x in items if isinstance(x, dict) and not x.get('is_dir')]
+                files = transferred_file_paths(job)
                 if len(files) != 1:
                     self.send_response(303)
                     self.send_header('Location', href('/progress/' + jid) + (('?token=' + urllib.parse.quote(TOKEN)) if TOKEN else ''))
