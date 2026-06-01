@@ -159,7 +159,7 @@ Login notes:
 - If `BAIDU_OPENLIST_ADMIN_PASSWORD` is not set, the service falls back to `BAIDU_OPENLIST_TOKEN`.
 - `BAIDU_OPENLIST_SESSION_SECRET` signs browser session cookies. Use a long random value.
 - `BAIDU_OPENLIST_GUEST_ENABLED=1` enables guest access.
-- `BAIDU_OPENLIST_GUEST_DAILY_LIMIT=3` lets each guest session submit up to 3 real transfer/download tasks per day.
+- `BAIDU_OPENLIST_GUEST_DAILY_LIMIT=3` lets each guest client fingerprint submit up to 3 real transfer/download tasks per day.
 - Guests can only see their own tasks. Admins can see all tasks.
 
 ## Nginx and HTTPS

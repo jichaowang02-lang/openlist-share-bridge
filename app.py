@@ -769,14 +769,14 @@ def parse_cookies(header):
     return cookies
 
 
-def guest_usage_file(guest_id, day=None):
+def guest_usage_file(quota_key, day=None):
     day = day or datetime.now().strftime('%Y%m%d')
-    safe_id = re.sub(r'[^A-Za-z0-9_-]', '', guest_id)[:80] or 'unknown'
+    safe_id = re.sub(r'[^A-Za-z0-9_-]', '', quota_key)[:80] or 'unknown'
     return GUEST_USAGE / f'{day}-{safe_id}.json'
 
 
-def load_guest_usage(guest_id):
-    path = guest_usage_file(guest_id)
+def load_guest_usage(quota_key):
+    path = guest_usage_file(quota_key)
     if not path.exists():
         return {'count': 0, 'jobs': []}
     try:
@@ -785,17 +785,17 @@ def load_guest_usage(guest_id):
         return {'count': 0, 'jobs': []}
 
 
-def save_guest_usage(guest_id, usage):
-    path = guest_usage_file(guest_id)
+def save_guest_usage(quota_key, usage):
+    path = guest_usage_file(quota_key)
     tmp = path.with_suffix('.tmp')
     with tmp.open('w', encoding='utf-8') as f:
         json.dump(usage, f, ensure_ascii=False, indent=2)
     tmp.replace(path)
 
 
-def consume_guest_quota(guest_id, job_id):
+def consume_guest_quota(quota_key, job_id):
     with lock:
-        usage = load_guest_usage(guest_id)
+        usage = load_guest_usage(quota_key)
         count = int(usage.get('count') or 0)
         if count >= GUEST_DAILY_LIMIT:
             return False, max(0, GUEST_DAILY_LIMIT - count)
@@ -803,13 +803,17 @@ def consume_guest_quota(guest_id, job_id):
         jobs = usage.get('jobs') or []
         jobs.append(job_id)
         usage['jobs'] = jobs[-200:]
-        save_guest_usage(guest_id, usage)
+        save_guest_usage(quota_key, usage)
         return True, max(0, GUEST_DAILY_LIMIT - usage['count'])
 
 
-def guest_quota_remaining(guest_id):
-    usage = load_guest_usage(guest_id)
+def guest_quota_remaining(quota_key):
+    usage = load_guest_usage(quota_key)
     return max(0, GUEST_DAILY_LIMIT - int(usage.get('count') or 0))
+
+
+def stable_hash(value):
+    return hashlib.sha256((SESSION_SECRET + ':' + value).encode('utf-8')).hexdigest()[:32]
 
 
 def role_can_access_job(role, subject, job):
@@ -878,12 +882,12 @@ def login_page(error=''):
     return render_page('登录 · OpenList Share Bridge', body)
 
 
-def bridge_home_page(role, subject, submitted=''):
+def bridge_home_page(role, subject, submitted='', quota_key=''):
     def href(target):
         return app_url(target)
     token_q = ''
     is_guest = role == 'guest'
-    quota = guest_quota_remaining(subject) if is_guest else None
+    quota = guest_quota_remaining(quota_key) if is_guest else None
     rows_html = task_rows_html(role, subject)
     guest_note = ''
     if is_guest:
@@ -939,7 +943,7 @@ def bridge_home_page(role, subject, submitted=''):
     return render_page('Baidu OpenList', body)
 
 
-def guest_page(subject=''):
+def guest_page(subject='', quota_key=''):
     body = (
         '<header class="hero">'
         '<h1>游客体验</h1>'
@@ -947,7 +951,7 @@ def guest_page(subject=''):
         '</header>'
         '<section class="card">'
         '<h2>开始体验</h2>'
-        f'<p class="note">今天还可以体验 {guest_quota_remaining(subject)} / {GUEST_DAILY_LIMIT} 次。游客只能看到自己的任务。</p>'
+        f'<p class="note">今天还可以体验 {guest_quota_remaining(quota_key)} / {GUEST_DAILY_LIMIT} 次。游客只能看到自己的任务。</p>'
         f'<div class="row-actions"><a class="btn" href="{app_url("/")}">进入下载页面</a><a class="btn secondary" href="{app_url("/logout")}">退出游客模式</a></div>'
         '</section>'
     )
@@ -990,6 +994,19 @@ class Handler(BaseHTTPRequestHandler):
     def require_job_access(self, job):
         role, subject = self.current_session()
         return role_can_access_job(role, subject, job)
+
+    def client_ip(self):
+        forwarded = self.headers.get('X-Forwarded-For', '')
+        if forwarded:
+            return forwarded.split(',')[0].strip()
+        real_ip = self.headers.get('X-Real-IP', '').strip()
+        if real_ip:
+            return real_ip
+        return self.client_address[0] if self.client_address else ''
+
+    def guest_quota_key(self):
+        ua = self.headers.get('User-Agent', '')
+        return stable_hash(f'{self.client_ip()}|{ua}')
 
     def clear_session(self):
         self.send_header('Set-Cookie', f'olsb_session=; Path={BASE_PATH or "/"}; Max-Age=0; HttpOnly; SameSite=Lax')
@@ -1040,7 +1057,7 @@ class Handler(BaseHTTPRequestHandler):
             role, subject = self.current_session()
             if role != 'guest':
                 self.redirect_to('/login'); return
-            self.send_html(guest_page(subject)); return
+            self.send_html(guest_page(subject, self.guest_quota_key())); return
         if path == '/logout':
             self.send_response(303)
             self.clear_session()
@@ -1053,9 +1070,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_html(login_page(), 401); return
         if path == '/':
             submitted = parse_qs(parsed.query).get('submitted', [''])[0]
-            self.send_html(bridge_home_page(role, subject, submitted))
+            self.send_html(bridge_home_page(role, subject, submitted, self.guest_quota_key()))
         elif path == '/tasks':
-            quota = guest_quota_remaining(subject) if role == 'guest' else None
+            quota = guest_quota_remaining(self.guest_quota_key()) if role == 'guest' else None
             self.send_json({'html': task_rows_html(role, subject), 'quota': quota})
         elif path.startswith('/progress/'):
             jid = path.rsplit('/', 1)[-1]
@@ -1325,7 +1342,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_html('没有识别到分享链接', 400); return
         jid = uuid.uuid4().hex[:12]
         if role == 'guest':
-            allowed, remaining = consume_guest_quota(subject, jid)
+            quota_key = self.guest_quota_key()
+            allowed, remaining = consume_guest_quota(quota_key, jid)
             if not allowed:
                 body = (
                     '<header class="hero"><h1>今日体验次数已用完</h1>'
@@ -1334,6 +1352,7 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 self.send_html(render_page('游客额度已用完', body), 429); return
         else:
+            quota_key = ''
             remaining = None
         job = {
             'id': jid,
@@ -1346,6 +1365,7 @@ class Handler(BaseHTTPRequestHandler):
         }
         if role == 'guest':
             job['guest_remaining_today'] = remaining
+            job['guest_quota_key'] = quota_key
         save_job(job)
         q.put(jid)
         self.send_response(303)
