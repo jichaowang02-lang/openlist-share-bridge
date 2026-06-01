@@ -1,9 +1,12 @@
 ﻿#!/usr/bin/env python3
 import html
+import hmac
+import hashlib
 import json
 import os
 import queue
 import re
+import secrets
 import shutil
 import socket
 import subprocess
@@ -13,6 +16,7 @@ import uuid
 import requests
 import urllib.parse
 import zipfile
+import base64
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -40,6 +44,9 @@ REMOTE_ROOT = '/__openlist_tmp'
 TTL_SECONDS = int(os.environ.get('BAIDU_OPENLIST_TTL_SECONDS', '86400'))
 PORT = int(os.environ.get('BAIDU_OPENLIST_PORT', '9801'))
 TOKEN = os.environ.get('BAIDU_OPENLIST_TOKEN', '')
+ADMIN_PASSWORD = os.environ.get('BAIDU_OPENLIST_ADMIN_PASSWORD', TOKEN)
+SESSION_SECRET = os.environ.get('BAIDU_OPENLIST_SESSION_SECRET', TOKEN or secrets.token_urlsafe(32))
+GUEST_ENABLED = os.environ.get('BAIDU_OPENLIST_GUEST_ENABLED', '1') != '0'
 BASE_PATH = os.environ.get('BAIDU_OPENLIST_BASE_PATH', '').rstrip('/')
 OPENLIST_BAIDU_MOUNT = os.environ.get('BAIDU_OPENLIST_MOUNT', '/baidu')
 OPENLIST_SITE_URL = os.environ.get('BAIDU_OPENLIST_SITE_URL', 'https://disk.example.com/openlist')
@@ -367,7 +374,7 @@ def worker():
             openlist_url = OPENLIST_SITE_URL.rstrip('/') + openlist_path
             file_paths = transferred_file_paths(job)
             openlist_direct_urls = [OPENLIST_SITE_URL.rstrip() + '/d' + OPENLIST_BAIDU_MOUNT.rstrip('/') + urllib.parse.quote(x, safe='/') for x in file_paths]
-            direct_urls = [(BASE_PATH or '') + '/download/' + job_id + (('?token=' + urllib.parse.quote(TOKEN)) if TOKEN else '')] if len(file_paths) == 1 else []
+            direct_urls = [app_url('/download/' + job_id)] if len(file_paths) == 1 else []
             job.update(
                 status='ready',
                 finished_at=now(),
@@ -698,6 +705,97 @@ def render_page(title, body):
     )
 
 
+def app_url(target):
+    return (BASE_PATH or '') + target
+
+
+def b64url(data):
+    return base64.urlsafe_b64encode(data).decode('ascii').rstrip('=')
+
+
+def sign_session(role, exp):
+    payload = f'{role}:{exp}'
+    sig = hmac.new(SESSION_SECRET.encode('utf-8'), payload.encode('utf-8'), hashlib.sha256).hexdigest()
+    return b64url(f'{payload}:{sig}'.encode('utf-8'))
+
+
+def verify_session(value):
+    if not value:
+        return ''
+    try:
+        padded = value + '=' * (-len(value) % 4)
+        raw = base64.urlsafe_b64decode(padded.encode('ascii')).decode('utf-8')
+        role, exp_s, sig = raw.rsplit(':', 2)
+        exp = int(exp_s)
+        if exp < int(time.time()):
+            return ''
+        payload = f'{role}:{exp}'
+        expected = hmac.new(SESSION_SECRET.encode('utf-8'), payload.encode('utf-8'), hashlib.sha256).hexdigest()
+        if hmac.compare_digest(sig, expected) and role in ('admin', 'guest'):
+            return role
+    except Exception:
+        return ''
+    return ''
+
+
+def parse_cookies(header):
+    cookies = {}
+    for part in (header or '').split(';'):
+        if '=' in part:
+            key, value = part.split('=', 1)
+            cookies[key.strip()] = value.strip()
+    return cookies
+
+
+def login_page(error=''):
+    error_html = f'<section class="card error-card"><p>{html.escape(error)}</p></section>' if error else ''
+    guest_html = ''
+    if GUEST_ENABLED:
+        guest_html = (
+            '<section class="card">'
+            '<h2>游客体验</h2>'
+            '<p class="note">游客模式只能查看体验说明，不能提交真实分享、不能下载你的网盘文件。</p>'
+            f'<form method="post" action="{app_url("/guest")}"><button class="secondary" type="submit">临时体验</button></form>'
+            '</section>'
+        )
+    body = (
+        '<header class="hero">'
+        '<h1>OpenList Share Bridge</h1>'
+        '<p>登录后粘贴百度网盘分享链接，临时转存并下载。</p>'
+        '</header>'
+        f'{error_html}'
+        '<section class="card">'
+        '<h2>管理员登录</h2>'
+        f'<form method="post" action="{app_url("/login")}">'
+        '<div class="form-row"><input type="password" name="password" placeholder="管理员密码"></div>'
+        '<div class="row-actions"><button type="submit">登录</button></div>'
+        '</form>'
+        '</section>'
+        f'{guest_html}'
+    )
+    return render_page('登录 · OpenList Share Bridge', body)
+
+
+def guest_page():
+    body = (
+        '<header class="hero">'
+        '<h1>游客体验</h1>'
+        '<p>这里展示项目流程。为了保护站点所有者的网盘和流量，游客不能提交真实任务。</p>'
+        '</header>'
+        '<section class="card">'
+        '<h2>工作流程</h2>'
+        '<ol>'
+        '<li>管理员粘贴百度网盘分享链接和提取码。</li>'
+        '<li>服务临时转存到 `/__openlist_tmp/{jobId}`。</li>'
+        '<li>OpenList 解析文件，页面生成下载入口。</li>'
+        '<li>下载成功、失败或中断后自动清理临时目录。</li>'
+        '</ol>'
+        f'<div class="row-actions"><a class="btn secondary" href="{app_url("/logout")}">退出游客模式</a></div>'
+        '</section>'
+    )
+    return render_page('游客体验 · OpenList Share Bridge', body)
+
+
 def fmt_time(iso):
     if not iso:
         return ''
@@ -708,11 +806,42 @@ def fmt_time(iso):
 
 
 class Handler(BaseHTTPRequestHandler):
-    def auth_ok(self):
-        if not TOKEN:
-            return True
+    def current_role(self):
+        cookies = parse_cookies(self.headers.get('Cookie', ''))
+        role = verify_session(cookies.get('olsb_session', ''))
+        if role:
+            return role
+        if not TOKEN and not ADMIN_PASSWORD:
+            return 'admin'
         qs = parse_qs(urlparse(self.path).query)
-        return qs.get('token', [''])[0] == TOKEN or self.headers.get('X-Token') == TOKEN
+        if qs.get('token', [''])[0] == TOKEN or self.headers.get('X-Token') == TOKEN:
+            return 'admin'
+        return ''
+
+    def auth_ok(self):
+        return self.current_role() == 'admin'
+
+    def set_session(self, role, max_age):
+        exp = int(time.time()) + max_age
+        value = sign_session(role, exp)
+        self.send_header('Set-Cookie', f'olsb_session={value}; Path={BASE_PATH or "/"}; Max-Age={max_age}; HttpOnly; SameSite=Lax')
+
+    def clear_session(self):
+        self.send_header('Set-Cookie', f'olsb_session=; Path={BASE_PATH or "/"}; Max-Age=0; HttpOnly; SameSite=Lax')
+
+    def normalize_path(self):
+        parsed = urlparse(self.path)
+        path = parsed.path
+        if BASE_PATH and path.startswith(BASE_PATH + '/'):
+            path = path[len(BASE_PATH):]
+        elif BASE_PATH and path == BASE_PATH:
+            path = '/'
+        return parsed, path
+
+    def redirect_to(self, target):
+        self.send_response(303)
+        self.send_header('Location', (BASE_PATH or '') + target)
+        self.end_headers()
 
     def send_html(self, body, code=200):
         self.send_response(code)
@@ -720,19 +849,36 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body.encode('utf-8'))
 
+    def do_HEAD(self):
+        parsed, path = self.normalize_path()
+        if path in ('/', '/login', '/guest'):
+            self.send_response(200 if path != '/guest' or GUEST_ENABLED else 404)
+        else:
+            self.send_response(404)
+        self.send_header('Content-Type', 'text/html; charset=utf-8')
+        self.end_headers()
+
     def do_GET(self):
-        if not self.auth_ok():
-            self.send_html('unauthorized', 401); return
-        parsed = urlparse(self.path)
-        path = parsed.path
-        if BASE_PATH and path.startswith(BASE_PATH + '/'):
-            path = path[len(BASE_PATH):]
-        elif BASE_PATH and path == BASE_PATH:
-            path = '/'
+        parsed, path = self.normalize_path()
         def href(target):
             return (BASE_PATH or '') + target
+        if path == '/login':
+            self.send_html(login_page()); return
+        if path == '/guest' and GUEST_ENABLED:
+            self.send_html(guest_page()); return
+        if path == '/logout':
+            self.send_response(303)
+            self.clear_session()
+            self.send_header('Location', href('/login'))
+            self.end_headers()
+            return
+        role = self.current_role()
+        if role == 'guest':
+            self.redirect_to('/guest'); return
+        if role != 'admin':
+            self.send_html(login_page(), 401); return
         if path == '/':
-            token_q = ('?token=' + html.escape(TOKEN)) if TOKEN else ''
+            token_q = ''
             rows = []
             for jf in sorted(JOBS.glob('*.json'), key=lambda p: p.stat().st_mtime, reverse=True)[:30]:
                 job = json.loads(jf.read_text(encoding='utf-8'))
@@ -762,6 +908,7 @@ class Handler(BaseHTTPRequestHandler):
                 '<header class="hero">'
                 '<h1>Baidu → OpenList</h1>'
                 '<p>把百度网盘分享转存到临时目录，生成可直接下载的链接</p>'
+                '<p><a class="back" href="' + href('/logout') + '">退出登录</a></p>'
                 '</header>'
                 f'<form class="card" method="post" action="{href("/submit")}{token_q}">'
                 '<h2>新建任务</h2>'
@@ -781,10 +928,10 @@ class Handler(BaseHTTPRequestHandler):
             jid = path.rsplit('/', 1)[-1]
             try:
                 job = load_job(jid)
-                token_q = ('?token=' + html.escape(TOKEN)) if TOKEN else ''
+                token_q = ''
                 p = job.get('download_progress') or {}
                 active = bool(p.get('active'))
-                token_q_raw = ('?token=' + urllib.parse.quote(TOKEN)) if TOKEN else ''
+                token_q_raw = ''
                 if job.get('status') == 'zip_ready':
                     start = f'<p><a class="btn" href="{href("/download_zip/" + jid)}{token_q}" download>下载已准备好的 ZIP</a></p>'
                     auto = ''
@@ -887,7 +1034,7 @@ class Handler(BaseHTTPRequestHandler):
                 files = transferred_file_paths(job)
                 if len(files) != 1:
                     self.send_response(303)
-                    self.send_header('Location', href('/progress/' + jid) + (('?token=' + urllib.parse.quote(TOKEN)) if TOKEN else ''))
+                    self.send_header('Location', href('/progress/' + jid))
                     self.end_headers()
                     return
                 update_progress(jid, active=True, phase='下载中', sent_bytes=0, current_index=0)
@@ -956,7 +1103,7 @@ class Handler(BaseHTTPRequestHandler):
                 job = load_job(jid)
                 log = (LOGS / f'{jid}.log').read_text(encoding='utf-8', errors='replace') if (LOGS / f'{jid}.log').exists() else ''
                 status = job.get('status', '')
-                token_q = ('?token=' + html.escape(TOKEN)) if TOKEN else ''
+                token_q = ''
                 actions = []
                 if job.get('direct_urls') and len(job.get('direct_urls', [])) == 1:
                     actions.append(f'<a class="btn" href="{html.escape(job["direct_urls"][0])}" download>直接下载文件</a>')
@@ -998,18 +1145,29 @@ class Handler(BaseHTTPRequestHandler):
             self.send_html('not found', 404)
 
     def do_POST(self):
-        if not self.auth_ok():
-            self.send_html('unauthorized', 401); return
-        parsed = urlparse(self.path)
-        path = parsed.path
-        if BASE_PATH and path.startswith(BASE_PATH + '/'):
-            path = path[len(BASE_PATH):]
-        elif BASE_PATH and path == BASE_PATH:
-            path = '/'
-        if path != '/submit':
-            self.send_html('not found', 404); return
+        parsed, path = self.normalize_path()
         length = int(self.headers.get('Content-Length', 0))
         data = parse_qs(self.rfile.read(length).decode('utf-8', errors='replace'))
+        if path == '/login':
+            password = data.get('password', [''])[0]
+            if ADMIN_PASSWORD and hmac.compare_digest(password, ADMIN_PASSWORD):
+                self.send_response(303)
+                self.set_session('admin', 7 * 86400)
+                self.send_header('Location', (BASE_PATH or '') + '/')
+                self.end_headers()
+                return
+            self.send_html(login_page('密码不正确'), 401)
+            return
+        if path == '/guest' and GUEST_ENABLED:
+            self.send_response(303)
+            self.set_session('guest', 2 * 3600)
+            self.send_header('Location', (BASE_PATH or '') + '/guest')
+            self.end_headers()
+            return
+        if not self.auth_ok():
+            self.send_html(login_page(), 401); return
+        if path != '/submit':
+            self.send_html('not found', 404); return
         text = data.get('text', [''])[0]
         code = data.get('code', [''])[0].strip() or extract_code(text)
         share = safe_share(text)
@@ -1019,7 +1177,7 @@ class Handler(BaseHTTPRequestHandler):
         job = {'id': jid, 'status': 'queued', 'created_at': now(), 'share_url': share, 'code': code}
         save_job(job)
         q.put(jid)
-        token_q = ('?token=' + html.escape(TOKEN)) if TOKEN else ''
+        token_q = ''
         self.send_response(303)
         self.send_header('Location', f'{BASE_PATH}/job/{jid}{token_q}' if BASE_PATH else f'/job/{jid}{token_q}')
         self.end_headers()

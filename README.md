@@ -18,7 +18,7 @@ OpenList Share Bridge is a lightweight self-hosted helper for people who already
 - Builds ZIP files in the background for small folders, with a progress page.
 - Refuses to server-side ZIP folders larger than `15GB` by default to avoid filling your VPS disk.
 - Deletes temporary Baidu folders on success, failure, interruption, and ZIP preparation failure.
-- Provides a token-protected web UI that can be reverse-proxied under a path such as `/baidu/`.
+- Provides a login system: admins can use the full workflow, guests only get a temporary demo page.
 
 ## Installation Paths
 
@@ -130,6 +130,9 @@ Example:
 BAIDU_OPENLIST_PORT=9801
 BAIDU_OPENLIST_TTL_SECONDS=86400
 BAIDU_OPENLIST_TOKEN=change-this-ui-token
+BAIDU_OPENLIST_ADMIN_PASSWORD=change-this-admin-password
+BAIDU_OPENLIST_SESSION_SECRET=change-this-random-session-secret
+BAIDU_OPENLIST_GUEST_ENABLED=1
 BAIDU_OPENLIST_BASE_PATH=/baidu
 GODEBUG=http2client=0,netdns=cgo+1
 BAIDU_OPENLIST_FORCE_IPV4=1
@@ -148,6 +151,13 @@ Baidu browser Cookie file:
 ```
 
 Do not commit real environment files, browser cookies, access tokens, account credentials, or private deployment details.
+
+Login notes:
+
+- `BAIDU_OPENLIST_ADMIN_PASSWORD` is the admin login password.
+- If `BAIDU_OPENLIST_ADMIN_PASSWORD` is not set, the service falls back to `BAIDU_OPENLIST_TOKEN`.
+- `BAIDU_OPENLIST_SESSION_SECRET` signs browser session cookies. Use a long random value.
+- `BAIDU_OPENLIST_GUEST_ENABLED=1` enables the guest demo page. Guests cannot submit real shares or download your cloud-drive files.
 
 ## Nginx and HTTPS
 
@@ -194,7 +204,7 @@ sudo docker logs -f openlist
 
 Common issues:
 
-- `unauthorized`: the URL is missing `?token=...`.
+- Login page keeps rejecting the password: check `BAIDU_OPENLIST_ADMIN_PASSWORD`. If it is not set, the password falls back to `BAIDU_OPENLIST_TOKEN`.
 - Browser downloads `.htm`: update to the latest version and submit the task again.
 - Baidu requests time out: check `GODEBUG=http2client=0,netdns=cgo+1` and `BAIDU_OPENLIST_FORCE_IPV4=1`.
 - OpenList cannot find files: make sure the OpenList Baidu mount path matches `BAIDU_OPENLIST_MOUNT`.
@@ -203,7 +213,7 @@ Common issues:
 ## Security Notes
 
 - This project controls files in your cloud drive. Run it only on a trusted server.
-- Protect the UI with `BAIDU_OPENLIST_TOKEN` and do not expose it without authentication.
+- Protect the UI with a strong `BAIDU_OPENLIST_ADMIN_PASSWORD` and keep `BAIDU_OPENLIST_SESSION_SECRET` private.
 - Treat Baidu cookies and OpenList admin tokens like passwords.
 - If a cookie or token is pasted into chat, logs, issues, or commits, rotate it.
 - The temporary folder root is `/__openlist_tmp`; cleanup code should never be pointed at a personal folder.

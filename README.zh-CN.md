@@ -16,7 +16,7 @@ OpenList Share Bridge 是一个自托管的小工具，适合已经在服务器�
 - 小文件夹后台生成 ZIP，并在页面显示进度。
 - 默认超过 `15GB` 的文件夹不在服务器打包，防止 VPS 磁盘被撑满。
 - 成功、失败、中断、打包失败都会尝试删除百度网盘临时目录。
-- 提供 Token 保护的 Web 页面，可挂在 `/baidu/` 这类路径下。
+- 提供登录系统：管理员登录后使用完整功能，游客只能临时体验说明页。
 
 ## 两种安装方式
 
@@ -130,6 +130,9 @@ sudo env PUBLIC_URL=https://drive.example.com \
 BAIDU_OPENLIST_PORT=9801
 BAIDU_OPENLIST_TTL_SECONDS=86400
 BAIDU_OPENLIST_TOKEN=change-this-ui-token
+BAIDU_OPENLIST_ADMIN_PASSWORD=change-this-admin-password
+BAIDU_OPENLIST_SESSION_SECRET=change-this-random-session-secret
+BAIDU_OPENLIST_GUEST_ENABLED=1
 BAIDU_OPENLIST_BASE_PATH=/baidu
 GODEBUG=http2client=0,netdns=cgo+1
 BAIDU_OPENLIST_FORCE_IPV4=1
@@ -148,6 +151,13 @@ BAIDU_OPENLIST_PAGE_SIZE=200
 ```
 
 不要把真实配置、浏览器 Cookie、访问 Token、账号凭据或私有部署信息提交到 GitHub。
+
+登录说明：
+
+- `BAIDU_OPENLIST_ADMIN_PASSWORD` 是管理员登录密码。
+- 如果没有配置 `BAIDU_OPENLIST_ADMIN_PASSWORD`，会退回使用 `BAIDU_OPENLIST_TOKEN`。
+- `BAIDU_OPENLIST_SESSION_SECRET` 用来签名浏览器会话 Cookie，建议使用随机长字符串。
+- `BAIDU_OPENLIST_GUEST_ENABLED=1` 开启游客体验页；游客不能提交真实分享、不能下载你的网盘文件。
 
 ## Nginx 和 HTTPS
 
@@ -194,7 +204,7 @@ sudo docker logs -f openlist
 
 常见问题：
 
-- 页面显示 `unauthorized`：访问 URL 没带 `?token=...`。
+- 登录页一直提示密码不正确：检查 `BAIDU_OPENLIST_ADMIN_PASSWORD`；如果没配置，会退回使用 `BAIDU_OPENLIST_TOKEN`。
 - 下载成 `.htm`：通常是旧版本误判单文件，更新到最新代码后重新提交任务。
 - 百度接口超时：确认 `GODEBUG=http2client=0,netdns=cgo+1` 和 `BAIDU_OPENLIST_FORCE_IPV4=1` 已配置。
 - OpenList 取不到文件：确认百度网盘挂载路径和 `BAIDU_OPENLIST_MOUNT` 一致。
@@ -203,7 +213,7 @@ sudo docker logs -f openlist
 ## 安全提醒
 
 - 这个服务会操作你的网盘文件，只建议部署在你信任的服务器上。
-- Web 页面一定要设置 `BAIDU_OPENLIST_TOKEN`。
+- Web 页面一定要设置强管理员密码 `BAIDU_OPENLIST_ADMIN_PASSWORD`，并保护好 `BAIDU_OPENLIST_SESSION_SECRET`。
 - 百度 Cookie 和 OpenList 管理员 Token 都等同于密码。
 - 如果 Cookie、Token 或账号凭据曾经出现在聊天、日志、Issue 或 Git 提交里，建议立即更换。
 - 临时目录根路径是 `/__openlist_tmp`，不要把清理逻辑指向你的私人文件夹。

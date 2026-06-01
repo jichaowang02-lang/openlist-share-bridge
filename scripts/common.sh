@@ -113,6 +113,13 @@ PY
 BAIDU_OPENLIST_PORT=$BRIDGE_PORT
 BAIDU_OPENLIST_TTL_SECONDS=86400
 BAIDU_OPENLIST_TOKEN=$ui_token
+BAIDU_OPENLIST_ADMIN_PASSWORD=${ADMIN_PASSWORD:-$ui_token}
+BAIDU_OPENLIST_SESSION_SECRET=${SESSION_SECRET:-$(python3 - <<'PY'
+import secrets
+print(secrets.token_urlsafe(32))
+PY
+)}
+BAIDU_OPENLIST_GUEST_ENABLED=${GUEST_ENABLED:-1}
 BAIDU_OPENLIST_BASE_PATH=$BASE_PATH
 GODEBUG=http2client=0,netdns=cgo+1
 BAIDU_OPENLIST_FORCE_IPV4=1
@@ -163,15 +170,14 @@ EOF
 }
 
 print_next_steps() {
-  local token public_url
-  token="$(sed -n 's/^BAIDU_OPENLIST_TOKEN=//p' "$APP_DIR/baidu-openlist.env")"
+  local public_url
   public_url="$(sed -n 's#^BAIDU_OPENLIST_SITE_URL=##p' "$APP_DIR/baidu-openlist.env" | sed "s#$OPENLIST_BASE_PATH\$##")"
   cat <<EOF
 
 Install finished.
 
 Bridge UI:
-  ${public_url%/}$BASE_PATH/?token=$token
+  ${public_url%/}$BASE_PATH/
 
 OpenList:
   ${public_url%/}$OPENLIST_BASE_PATH/

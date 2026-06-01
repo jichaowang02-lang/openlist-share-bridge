@@ -27,6 +27,6 @@ echo "== HTTP =="
 if [ -f "$APP_DIR/baidu-openlist.env" ]; then
   # shellcheck disable=SC1090
   . "$APP_DIR/baidu-openlist.env"
-  curl -sS -I "http://127.0.0.1:${BAIDU_OPENLIST_PORT:-9801}${BAIDU_OPENLIST_BASE_PATH:-/baidu}/?token=${BAIDU_OPENLIST_TOKEN:-}" | head -10 || true
+  curl -sS -I "http://127.0.0.1:${BAIDU_OPENLIST_PORT:-9801}${BAIDU_OPENLIST_BASE_PATH:-/baidu}/" | head -10 || true
   curl -sS "http://127.0.0.1:5244/openlist/api/public/settings" | head -20 || true
 fi
