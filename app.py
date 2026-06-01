@@ -5,6 +5,7 @@ import os
 import queue
 import re
 import shutil
+import socket
 import subprocess
 import threading
 import time
@@ -16,6 +17,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+_orig_getaddrinfo = socket.getaddrinfo
+
+
+def ipv4_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    if os.environ.get('BAIDU_OPENLIST_FORCE_IPV4', '1') != '0':
+        family = socket.AF_INET
+    return _orig_getaddrinfo(host, port, family, type, proto, flags)
+
+
+socket.getaddrinfo = ipv4_getaddrinfo
 
 BASE = Path(os.environ.get('BAIDU_OPENLIST_BASE', '/opt/baidu-openlist'))
 BIN = BASE / 'bin' / 'BaiduPCS-Go'
@@ -104,6 +116,20 @@ def run_cmd(job, args, timeout=None):
     if any(marker in output for marker in fail_markers):
         raise RuntimeError(output.strip().splitlines()[-1] if output.strip() else 'command reported failure')
     return output
+
+
+def run_cmd_retry(job, args, attempts=3, delay=2, timeout=None):
+    last_error = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return run_cmd(job, args, timeout=timeout)
+        except Exception as e:
+            last_error = e
+            if attempt >= attempts:
+                break
+            append_log(job, f'命令失败，{delay} 秒后重试 ({attempt}/{attempts}): {e}')
+            time.sleep(delay)
+    raise last_error
 
 
 def delete_remote_temp(job, reason='任务结束'):
@@ -314,9 +340,7 @@ def worker():
             share = job['share_url']
             code = job.get('code') or ''
 
-            run_cmd(job, [str(BIN), 'mkdir', REMOTE_ROOT])
-            run_cmd(job, [str(BIN), 'mkdir', remote_dir])
-            run_cmd(job, [str(BIN), 'cd', remote_dir])
+            run_cmd_retry(job, [str(BIN), 'mkdir', remote_dir], attempts=4, delay=3, timeout=45)
             web_transfer(job, remote_dir)
             job['remote_dir'] = remote_dir
             job['status'] = 'transferred'
