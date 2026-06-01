@@ -1,0 +1,28 @@
+# Runtime state
+.runtime/
+downloads/
+jobs/
+logs/
+zip_cache/
+tmp/
+
+# Secrets
+baidu-openlist.env
+browser_cookie.txt
+*.cookie
+*.cookies
+*.token
+*.secret
+
+# Local backups and generated files
+*.bak
+*.bak-*
+app.py.bak-*
+__pycache__/
+*.py[cod]
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
