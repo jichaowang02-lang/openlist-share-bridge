@@ -68,7 +68,7 @@ Save your Baidu browser cookie here:
 /opt/baidu-openlist/browser_cookie.txt
 ```
 
-Do not commit `baidu-openlist.env`, `browser_cookie.txt`, cookies, tokens, server IPs, SSH passwords, or personal domains.
+Do not commit real environment files, browser cookies, access tokens, account credentials, or private deployment details.
 
 ## Reverse Proxy
 

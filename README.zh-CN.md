@@ -66,15 +66,7 @@ BAIDU_OPENLIST_MAX_SERVER_ZIP_BYTES=16106127360
 /opt/baidu-openlist/browser_cookie.txt
 ```
 
-不要把下面这些内容提交到 GitHub：
-
-- `baidu-openlist.env`
-- `browser_cookie.txt`
-- 百度 Cookie
-- OpenList 管理员 Token
-- 服务器 IP
-- SSH 密码
-- 个人域名
+不要把真实配置、浏览器 Cookie、访问 Token、账号凭据或私有部署信息提交到 GitHub。
 
 ## Nginx 示例
 
@@ -97,7 +89,7 @@ location /baidu/ {
 - 这个服务会操作你的网盘文件，只建议部署在你信任的服务器上。
 - Web 页面一定要设置 `BAIDU_OPENLIST_TOKEN`。
 - 百度 Cookie 和 OpenList 管理员 Token 都等同于密码。
-- 如果 Cookie、Token、服务器密码曾经出现在聊天、日志、Issue 或 Git 提交里，建议立即更换。
+- 如果 Cookie、Token 或账号凭据曾经出现在聊天、日志、Issue 或 Git 提交里，建议立即更换。
 - 临时目录根路径是 `/__openlist_tmp`，不要把清理逻辑指向你的私人文件夹。
 
 ## 当前状态
