@@ -723,7 +723,7 @@ def sign_session(role, exp, subject=''):
 
 def verify_session(value):
     if not value:
-        return ''
+        return '', ''
     try:
         padded = value + '=' * (-len(value) % 4)
         raw = base64.urlsafe_b64decode(padded.encode('ascii')).decode('utf-8')
