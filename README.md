@@ -1,5 +1,7 @@
 # OpenList Share Bridge
 
+[简体中文](README.zh-CN.md)
+
 Paste a cloud-drive share link, bridge it into OpenList, download it from your own server, then automatically clean up the temporary files.
 
 OpenList Share Bridge is a lightweight self-hosted helper for people who already use [OpenList](https://github.com/OpenListTeam/OpenList). It currently focuses on Baidu Netdisk shares: submit a Baidu share URL and extraction code, the service transfers the shared files into a temporary Baidu Netdisk folder, exposes a download flow through OpenList, and deletes the temporary folder after success or failure.
