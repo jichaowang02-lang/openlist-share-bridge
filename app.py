@@ -118,6 +118,24 @@ def run_cmd(job, args, timeout=None):
     return output
 
 
+def run_pcs_rm(job, remote, attempts=5, delay=3):
+    last_output = ''
+    for attempt in range(1, attempts + 1):
+        try:
+            output = run_cmd(job, [str(BIN), 'rm', remote], timeout=90)
+        except Exception as e:
+            output = str(e)
+        last_output = output or ''
+        if any(marker in last_output for marker in ('操作成功', '文件不存在', 'No such file')):
+            return last_output
+        if '操作失败' not in last_output and '网络错误' not in last_output and 'timeout' not in last_output.lower():
+            break
+        if attempt < attempts:
+            append_log(job, f'删除临时目录未确认成功，{delay} 秒后重试 ({attempt}/{attempts})')
+            time.sleep(delay)
+    raise RuntimeError(last_output.strip().splitlines()[-1] if last_output.strip() else '删除临时目录未确认成功')
+
+
 def run_cmd_retry(job, args, attempts=3, delay=2, timeout=None):
     last_error = None
     for attempt in range(1, attempts + 1):
@@ -138,7 +156,7 @@ def delete_remote_temp(job, reason='任务结束'):
         return False, 'missing remote_dir'
     try:
         append_log(job, f'{reason}，删除百度网盘临时目录: {remote}')
-        run_cmd(job, [str(BIN), 'rm', remote])
+        run_pcs_rm(job, remote)
         job['remote_kept'] = False
         job['deleted_remote_at'] = now()
         save_job(job)
