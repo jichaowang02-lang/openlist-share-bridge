@@ -816,6 +816,39 @@ def role_can_access_job(role, subject, job):
     return role == 'admin' or (role == 'guest' and subject and job.get('owner_role') == 'guest' and job.get('owner_id') == subject)
 
 
+def task_rows_html(role, subject):
+    rows = []
+    for jf in sorted(JOBS.glob('*.json'), key=lambda p: p.stat().st_mtime, reverse=True)[:80]:
+        job = json.loads(jf.read_text(encoding='utf-8'))
+        if not role_can_access_job(role, subject, job):
+            continue
+        jid = html.escape(job['id'])
+        status = job.get('status', '')
+        if job.get('direct_urls') and len(job.get('direct_urls', [])) == 1:
+            link_cell = f'<a class="btn" href="{html.escape(job["direct_urls"][0])}" download>直接下载</a>'
+        elif job.get('openlist_url'):
+            link_cell = (
+                '<div class="row-actions">'
+                f'<a class="btn" href="{app_url("/download/" + jid)}" download>下载 ZIP</a>'
+                f'<a class="btn secondary" href="{html.escape(job.get("openlist_url", ""))}">打开目录</a>'
+                '</div>'
+            )
+        elif job.get('error'):
+            link_cell = f'<span class="mono" style="color:#c62828">{html.escape(str(job.get("error","")))[:120]}</span>'
+        else:
+            link_cell = '<span style="color:var(--text-muted)">—</span>'
+        rows.append(
+            f'<tr><td><a class="mono" href="{app_url("/job/" + jid)}">{jid}</a></td>'
+            f'<td><span class="badge {html.escape(status)}">{html.escape(status) or "—"}</span></td>'
+            f'<td>{progress_html(job)}</td>'
+            f'<td class="mono" style="color:var(--text-muted)">{html.escape(fmt_time(job.get("created_at","")))}</td>'
+            f'<td>{link_cell}</td></tr>'
+        )
+        if len(rows) >= 30:
+            break
+    return ''.join(rows) if rows else '<tr><td colspan="5" class="empty">还没有任务，提交一个试试吧</td></tr>'
+
+
 def login_page(error=''):
     error_html = f'<section class="card error-card"><p>{html.escape(error)}</p></section>' if error else ''
     guest_html = ''
@@ -851,39 +884,10 @@ def bridge_home_page(role, subject, submitted=''):
     token_q = ''
     is_guest = role == 'guest'
     quota = guest_quota_remaining(subject) if is_guest else None
-    rows = []
-    for jf in sorted(JOBS.glob('*.json'), key=lambda p: p.stat().st_mtime, reverse=True)[:80]:
-        job = json.loads(jf.read_text(encoding='utf-8'))
-        if not role_can_access_job(role, subject, job):
-            continue
-        jid = html.escape(job['id'])
-        status = job.get('status', '')
-        if job.get('direct_urls') and len(job.get('direct_urls', [])) == 1:
-            link_cell = f'<a class="btn" href="{html.escape(job["direct_urls"][0])}" download>直接下载</a>'
-        elif job.get('openlist_url'):
-            link_cell = (
-                '<div class="row-actions">'
-                f'<a class="btn" href="{href("/download/" + jid)}{token_q}" download>下载 ZIP</a>'
-                f'<a class="btn secondary" href="{html.escape(job.get("openlist_url", ""))}">打开目录</a>'
-                '</div>'
-            )
-        elif job.get('error'):
-            link_cell = f'<span class="mono" style="color:#c62828">{html.escape(str(job.get("error","")))[:120]}</span>'
-        else:
-            link_cell = '<span style="color:var(--text-muted)">—</span>'
-        rows.append(
-            f'<tr><td><a class="mono" href="{href("/job/" + jid)}{token_q}">{jid}</a></td>'
-            f'<td><span class="badge {html.escape(status)}">{html.escape(status) or "—"}</span></td>'
-            f'<td>{progress_html(job)}</td>'
-            f'<td class="mono" style="color:var(--text-muted)">{html.escape(fmt_time(job.get("created_at","")))}</td>'
-            f'<td>{link_cell}</td></tr>'
-        )
-        if len(rows) >= 30:
-            break
-    rows_html = ''.join(rows) if rows else '<tr><td colspan="5" class="empty">还没有任务，提交一个试试吧</td></tr>'
+    rows_html = task_rows_html(role, subject)
     guest_note = ''
     if is_guest:
-        guest_note = f'<section class="card"><h2>游客额度</h2><p class="note">今天还可以体验 {quota} / {GUEST_DAILY_LIMIT} 次。游客任务只对当前浏览器会话可见。</p></section>'
+        guest_note = f'<section class="card"><h2>游客额度</h2><p class="note">今天还可以体验 <span id="guest-quota">{quota}</span> / {GUEST_DAILY_LIMIT} 次。游客任务只对当前浏览器会话可见。</p></section>'
     submitted_note = ''
     if submitted:
         submitted_note = (
@@ -892,8 +896,25 @@ def bridge_home_page(role, subject, submitted=''):
             f'<p class="note">任务 <span class="mono">{html.escape(submitted)}</span> 已加入队列，下面会自动刷新进度。</p>'
             '</section>'
         )
+    refresh_script = (
+        '<script>'
+        'async function refreshTasks(){'
+        'try{'
+        f'const r=await fetch("{href("/tasks")}",{{headers:{{"Accept":"application/json"}}}});'
+        'if(!r.ok)return;'
+        'const data=await r.json();'
+        'const body=document.getElementById("task-rows");'
+        'if(body)body.innerHTML=data.html;'
+        'const quota=document.getElementById("guest-quota");'
+        'if(quota&&data.quota!==null)quota.textContent=data.quota;'
+        '}catch(e){}'
+        '}'
+        'setInterval(refreshTasks,2000);'
+        'setTimeout(refreshTasks,700);'
+        'if(location.search.includes("submitted=")){history.replaceState(null,"",location.pathname);}'
+        '</script>'
+    )
     body = (
-        '<meta http-equiv="refresh" content="2">'
         '<header class="hero">'
         '<h1>Baidu → OpenList</h1>'
         '<p>把百度网盘分享转存到临时目录，生成可直接下载的链接</p>'
@@ -911,8 +932,9 @@ def bridge_home_page(role, subject, submitted=''):
         '<section class="card">'
         '<h2>最近任务</h2>'
         '<table><thead><tr><th>任务</th><th>状态</th><th>进度</th><th>创建时间</th><th>操作</th></tr></thead>'
-        f'<tbody>{rows_html}</tbody></table>'
+        f'<tbody id="task-rows">{rows_html}</tbody></table>'
         '</section>'
+        f'{refresh_script}'
     )
     return render_page('Baidu OpenList', body)
 
@@ -992,6 +1014,13 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body.encode('utf-8'))
 
+    def send_json(self, data, code=200):
+        self.send_response(code)
+        self.send_header('Content-Type', 'application/json; charset=utf-8')
+        self.send_header('Cache-Control', 'no-store')
+        self.end_headers()
+        self.wfile.write(json.dumps(data, ensure_ascii=False).encode('utf-8'))
+
     def do_HEAD(self):
         parsed, path = self.normalize_path()
         if path in ('/', '/login', '/guest'):
@@ -1025,6 +1054,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/':
             submitted = parse_qs(parsed.query).get('submitted', [''])[0]
             self.send_html(bridge_home_page(role, subject, submitted))
+        elif path == '/tasks':
+            quota = guest_quota_remaining(subject) if role == 'guest' else None
+            self.send_json({'html': task_rows_html(role, subject), 'quota': quota})
         elif path.startswith('/progress/'):
             jid = path.rsplit('/', 1)[-1]
             try:
