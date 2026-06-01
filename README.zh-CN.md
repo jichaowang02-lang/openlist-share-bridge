@@ -133,6 +133,7 @@ BAIDU_OPENLIST_TOKEN=change-this-ui-token
 BAIDU_OPENLIST_ADMIN_PASSWORD=change-this-admin-password
 BAIDU_OPENLIST_SESSION_SECRET=change-this-random-session-secret
 BAIDU_OPENLIST_GUEST_ENABLED=1
+BAIDU_OPENLIST_GUEST_DAILY_LIMIT=3
 BAIDU_OPENLIST_BASE_PATH=/baidu
 GODEBUG=http2client=0,netdns=cgo+1
 BAIDU_OPENLIST_FORCE_IPV4=1
@@ -157,7 +158,9 @@ BAIDU_OPENLIST_PAGE_SIZE=200
 - `BAIDU_OPENLIST_ADMIN_PASSWORD` 是管理员登录密码。
 - 如果没有配置 `BAIDU_OPENLIST_ADMIN_PASSWORD`，会退回使用 `BAIDU_OPENLIST_TOKEN`。
 - `BAIDU_OPENLIST_SESSION_SECRET` 用来签名浏览器会话 Cookie，建议使用随机长字符串。
-- `BAIDU_OPENLIST_GUEST_ENABLED=1` 开启游客体验页；游客不能提交真实分享、不能下载你的网盘文件。
+- `BAIDU_OPENLIST_GUEST_ENABLED=1` 开启游客访问。
+- `BAIDU_OPENLIST_GUEST_DAILY_LIMIT=3` 表示每个游客会话每天最多提交 3 个真实转存/下载任务。
+- 游客只能看到自己的任务，管理员可以看到所有任务。
 
 ## Nginx 和 HTTPS
 

@@ -39,6 +39,7 @@ DOWNLOADS = BASE / 'downloads'
 JOBS = BASE / 'jobs'
 LOGS = BASE / 'logs'
 ZIP_CACHE = BASE / 'zip_cache'
+GUEST_USAGE = BASE / 'guest_usage'
 BROWSER_COOKIE_FILE = BASE / 'browser_cookie.txt'
 REMOTE_ROOT = '/__openlist_tmp'
 TTL_SECONDS = int(os.environ.get('BAIDU_OPENLIST_TTL_SECONDS', '86400'))
@@ -47,6 +48,7 @@ TOKEN = os.environ.get('BAIDU_OPENLIST_TOKEN', '')
 ADMIN_PASSWORD = os.environ.get('BAIDU_OPENLIST_ADMIN_PASSWORD', TOKEN)
 SESSION_SECRET = os.environ.get('BAIDU_OPENLIST_SESSION_SECRET', TOKEN or secrets.token_urlsafe(32))
 GUEST_ENABLED = os.environ.get('BAIDU_OPENLIST_GUEST_ENABLED', '1') != '0'
+GUEST_DAILY_LIMIT = int(os.environ.get('BAIDU_OPENLIST_GUEST_DAILY_LIMIT', '3'))
 BASE_PATH = os.environ.get('BAIDU_OPENLIST_BASE_PATH', '').rstrip('/')
 OPENLIST_BAIDU_MOUNT = os.environ.get('BAIDU_OPENLIST_MOUNT', '/baidu')
 OPENLIST_SITE_URL = os.environ.get('BAIDU_OPENLIST_SITE_URL', 'https://disk.example.com/openlist')
@@ -56,7 +58,7 @@ OPENLIST_PAGE_SIZE = int(os.environ.get('BAIDU_OPENLIST_PAGE_SIZE', '200'))
 ZIP_FREE_SPACE_BUFFER = int(os.environ.get('BAIDU_OPENLIST_ZIP_FREE_SPACE_BUFFER', str(2 * 1024 * 1024 * 1024)))
 MAX_SERVER_ZIP_BYTES = int(os.environ.get('BAIDU_OPENLIST_MAX_SERVER_ZIP_BYTES', str(15 * 1024 * 1024 * 1024)))
 
-for p in (DOWNLOADS, JOBS, LOGS, ZIP_CACHE):
+for p in (DOWNLOADS, JOBS, LOGS, ZIP_CACHE, GUEST_USAGE):
     p.mkdir(parents=True, exist_ok=True)
 
 q = queue.Queue()
@@ -713,8 +715,8 @@ def b64url(data):
     return base64.urlsafe_b64encode(data).decode('ascii').rstrip('=')
 
 
-def sign_session(role, exp):
-    payload = f'{role}:{exp}'
+def sign_session(role, exp, subject=''):
+    payload = f'{role}:{exp}:{subject}'
     sig = hmac.new(SESSION_SECRET.encode('utf-8'), payload.encode('utf-8'), hashlib.sha256).hexdigest()
     return b64url(f'{payload}:{sig}'.encode('utf-8'))
 
@@ -725,17 +727,17 @@ def verify_session(value):
     try:
         padded = value + '=' * (-len(value) % 4)
         raw = base64.urlsafe_b64decode(padded.encode('ascii')).decode('utf-8')
-        role, exp_s, sig = raw.rsplit(':', 2)
+        role, exp_s, subject, sig = raw.rsplit(':', 3)
         exp = int(exp_s)
         if exp < int(time.time()):
-            return ''
-        payload = f'{role}:{exp}'
+            return '', ''
+        payload = f'{role}:{exp}:{subject}'
         expected = hmac.new(SESSION_SECRET.encode('utf-8'), payload.encode('utf-8'), hashlib.sha256).hexdigest()
         if hmac.compare_digest(sig, expected) and role in ('admin', 'guest'):
-            return role
+            return role, subject
     except Exception:
-        return ''
-    return ''
+        return '', ''
+    return '', ''
 
 
 def parse_cookies(header):
@@ -747,6 +749,53 @@ def parse_cookies(header):
     return cookies
 
 
+def guest_usage_file(guest_id, day=None):
+    day = day or datetime.now().strftime('%Y%m%d')
+    safe_id = re.sub(r'[^A-Za-z0-9_-]', '', guest_id)[:80] or 'unknown'
+    return GUEST_USAGE / f'{day}-{safe_id}.json'
+
+
+def load_guest_usage(guest_id):
+    path = guest_usage_file(guest_id)
+    if not path.exists():
+        return {'count': 0, 'jobs': []}
+    try:
+        return json.loads(path.read_text(encoding='utf-8'))
+    except Exception:
+        return {'count': 0, 'jobs': []}
+
+
+def save_guest_usage(guest_id, usage):
+    path = guest_usage_file(guest_id)
+    tmp = path.with_suffix('.tmp')
+    with tmp.open('w', encoding='utf-8') as f:
+        json.dump(usage, f, ensure_ascii=False, indent=2)
+    tmp.replace(path)
+
+
+def consume_guest_quota(guest_id, job_id):
+    with lock:
+        usage = load_guest_usage(guest_id)
+        count = int(usage.get('count') or 0)
+        if count >= GUEST_DAILY_LIMIT:
+            return False, max(0, GUEST_DAILY_LIMIT - count)
+        usage['count'] = count + 1
+        jobs = usage.get('jobs') or []
+        jobs.append(job_id)
+        usage['jobs'] = jobs[-200:]
+        save_guest_usage(guest_id, usage)
+        return True, max(0, GUEST_DAILY_LIMIT - usage['count'])
+
+
+def guest_quota_remaining(guest_id):
+    usage = load_guest_usage(guest_id)
+    return max(0, GUEST_DAILY_LIMIT - int(usage.get('count') or 0))
+
+
+def role_can_access_job(role, subject, job):
+    return role == 'admin' or (role == 'guest' and subject and job.get('owner_role') == 'guest' and job.get('owner_id') == subject)
+
+
 def login_page(error=''):
     error_html = f'<section class="card error-card"><p>{html.escape(error)}</p></section>' if error else ''
     guest_html = ''
@@ -754,7 +803,7 @@ def login_page(error=''):
         guest_html = (
             '<section class="card">'
             '<h2>游客体验</h2>'
-            '<p class="note">游客模式只能查看体验说明，不能提交真实分享、不能下载你的网盘文件。</p>'
+            f'<p class="note">游客每天可以体验 {GUEST_DAILY_LIMIT} 次真实转存和下载，只能看到自己的临时任务。</p>'
             f'<form method="post" action="{app_url("/guest")}"><button class="secondary" type="submit">临时体验</button></form>'
             '</section>'
         )
@@ -776,21 +825,77 @@ def login_page(error=''):
     return render_page('登录 · OpenList Share Bridge', body)
 
 
-def guest_page():
+def bridge_home_page(role, subject):
+    def href(target):
+        return app_url(target)
+    token_q = ''
+    is_guest = role == 'guest'
+    quota = guest_quota_remaining(subject) if is_guest else None
+    rows = []
+    for jf in sorted(JOBS.glob('*.json'), key=lambda p: p.stat().st_mtime, reverse=True)[:80]:
+        job = json.loads(jf.read_text(encoding='utf-8'))
+        if not role_can_access_job(role, subject, job):
+            continue
+        jid = html.escape(job['id'])
+        status = job.get('status', '')
+        if job.get('direct_urls') and len(job.get('direct_urls', [])) == 1:
+            link_cell = f'<a class="btn" href="{html.escape(job["direct_urls"][0])}" download>直接下载</a>'
+        elif job.get('openlist_url'):
+            link_cell = (
+                '<div class="row-actions">'
+                f'<a class="btn" href="{href("/download/" + jid)}{token_q}" download>下载 ZIP</a>'
+                f'<a class="btn secondary" href="{html.escape(job.get("openlist_url", ""))}">打开目录</a>'
+                '</div>'
+            )
+        elif job.get('error'):
+            link_cell = f'<span class="mono" style="color:#c62828">{html.escape(str(job.get("error","")))[:120]}</span>'
+        else:
+            link_cell = '<span style="color:var(--text-muted)">—</span>'
+        rows.append(
+            f'<tr><td><a class="mono" href="{href("/job/" + jid)}{token_q}">{jid}</a></td>'
+            f'<td><span class="badge {html.escape(status)}">{html.escape(status) or "—"}</span></td>'
+            f'<td class="mono" style="color:var(--text-muted)">{html.escape(fmt_time(job.get("created_at","")))}</td>'
+            f'<td>{link_cell}</td></tr>'
+        )
+        if len(rows) >= 30:
+            break
+    rows_html = ''.join(rows) if rows else '<tr><td colspan="4" class="empty">还没有任务，提交一个试试吧</td></tr>'
+    guest_note = ''
+    if is_guest:
+        guest_note = f'<section class="card"><h2>游客额度</h2><p class="note">今天还可以体验 {quota} / {GUEST_DAILY_LIMIT} 次。游客任务只对当前浏览器会话可见。</p></section>'
+    body = (
+        '<header class="hero">'
+        '<h1>Baidu → OpenList</h1>'
+        '<p>把百度网盘分享转存到临时目录，生成可直接下载的链接</p>'
+        '<p><a class="back" href="' + href('/logout') + '">退出登录</a></p>'
+        '</header>'
+        f'{guest_note}'
+        f'<form class="card" method="post" action="{href("/submit")}{token_q}">'
+        '<h2>新建任务</h2>'
+        '<div class="form-row"><textarea name="text" placeholder="粘贴百度分享链接，可包含提取码"></textarea></div>'
+        '<div class="form-row"><input name="code" placeholder="提取码（留空自动识别）"></div>'
+        '<div class="row-actions"><button type="submit">提交下载</button>'
+        '<span class="note">默认 24 小时后自动从百度网盘删除临时目录</span></div>'
+        '</form>'
+        '<section class="card">'
+        '<h2>最近任务</h2>'
+        '<table><thead><tr><th>任务</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead>'
+        f'<tbody>{rows_html}</tbody></table>'
+        '</section>'
+    )
+    return render_page('Baidu OpenList', body)
+
+
+def guest_page(subject=''):
     body = (
         '<header class="hero">'
         '<h1>游客体验</h1>'
-        '<p>这里展示项目流程。为了保护站点所有者的网盘和流量，游客不能提交真实任务。</p>'
+        f'<p>游客每天可以体验 {GUEST_DAILY_LIMIT} 次真实转存和下载。</p>'
         '</header>'
         '<section class="card">'
-        '<h2>工作流程</h2>'
-        '<ol>'
-        '<li>管理员粘贴百度网盘分享链接和提取码。</li>'
-        '<li>服务临时转存到 `/__openlist_tmp/{jobId}`。</li>'
-        '<li>OpenList 解析文件，页面生成下载入口。</li>'
-        '<li>下载成功、失败或中断后自动清理临时目录。</li>'
-        '</ol>'
-        f'<div class="row-actions"><a class="btn secondary" href="{app_url("/logout")}">退出游客模式</a></div>'
+        '<h2>开始体验</h2>'
+        f'<p class="note">今天还可以体验 {guest_quota_remaining(subject)} / {GUEST_DAILY_LIMIT} 次。游客只能看到自己的任务。</p>'
+        f'<div class="row-actions"><a class="btn" href="{app_url("/")}">进入下载页面</a><a class="btn secondary" href="{app_url("/logout")}">退出游客模式</a></div>'
         '</section>'
     )
     return render_page('游客体验 · OpenList Share Bridge', body)
@@ -806,25 +911,32 @@ def fmt_time(iso):
 
 
 class Handler(BaseHTTPRequestHandler):
-    def current_role(self):
+    def current_session(self):
         cookies = parse_cookies(self.headers.get('Cookie', ''))
-        role = verify_session(cookies.get('olsb_session', ''))
+        role, subject = verify_session(cookies.get('olsb_session', ''))
         if role:
-            return role
+            return role, subject
         if not TOKEN and not ADMIN_PASSWORD:
-            return 'admin'
+            return 'admin', ''
         qs = parse_qs(urlparse(self.path).query)
         if qs.get('token', [''])[0] == TOKEN or self.headers.get('X-Token') == TOKEN:
-            return 'admin'
-        return ''
+            return 'admin', ''
+        return '', ''
+
+    def current_role(self):
+        return self.current_session()[0]
 
     def auth_ok(self):
         return self.current_role() == 'admin'
 
-    def set_session(self, role, max_age):
+    def set_session(self, role, max_age, subject=''):
         exp = int(time.time()) + max_age
-        value = sign_session(role, exp)
+        value = sign_session(role, exp, subject)
         self.send_header('Set-Cookie', f'olsb_session={value}; Path={BASE_PATH or "/"}; Max-Age={max_age}; HttpOnly; SameSite=Lax')
+
+    def require_job_access(self, job):
+        role, subject = self.current_session()
+        return role_can_access_job(role, subject, job)
 
     def clear_session(self):
         self.send_header('Set-Cookie', f'olsb_session=; Path={BASE_PATH or "/"}; Max-Age=0; HttpOnly; SameSite=Lax')
@@ -865,69 +977,28 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/login':
             self.send_html(login_page()); return
         if path == '/guest' and GUEST_ENABLED:
-            self.send_html(guest_page()); return
+            role, subject = self.current_session()
+            if role != 'guest':
+                self.redirect_to('/login'); return
+            self.send_html(guest_page(subject)); return
         if path == '/logout':
             self.send_response(303)
             self.clear_session()
             self.send_header('Location', href('/login'))
             self.end_headers()
             return
-        role = self.current_role()
-        if role == 'guest':
-            self.redirect_to('/guest'); return
+        role, subject = self.current_session()
         if role != 'admin':
-            self.send_html(login_page(), 401); return
+            if role != 'guest':
+                self.send_html(login_page(), 401); return
         if path == '/':
-            token_q = ''
-            rows = []
-            for jf in sorted(JOBS.glob('*.json'), key=lambda p: p.stat().st_mtime, reverse=True)[:30]:
-                job = json.loads(jf.read_text(encoding='utf-8'))
-                jid = html.escape(job['id'])
-                status = job.get('status', '')
-                if job.get('direct_urls') and len(job.get('direct_urls', [])) == 1:
-                    link_cell = f'<a class="btn" href="{html.escape(job["direct_urls"][0])}" download>直接下载</a>'
-                elif job.get('openlist_url'):
-                    link_cell = (
-                        '<div class="row-actions">'
-                        f'<a class="btn" href="{href("/download/" + jid)}{token_q}" download>下载 ZIP</a>'
-                        f'<a class="btn secondary" href="{html.escape(job.get("openlist_url", ""))}">打开目录</a>'
-                        '</div>'
-                    )
-                elif job.get('error'):
-                    link_cell = f'<span class="mono" style="color:#c62828">{html.escape(str(job.get("error","")))[:120]}</span>'
-                else:
-                    link_cell = '<span style="color:var(--text-muted)">—</span>'
-                rows.append(
-                    f'<tr><td><a class="mono" href="{href("/job/" + jid)}{token_q}">{jid}</a></td>'
-                    f'<td><span class="badge {html.escape(status)}">{html.escape(status) or "—"}</span></td>'
-                    f'<td class="mono" style="color:var(--text-muted)">{html.escape(fmt_time(job.get("created_at","")))}</td>'
-                    f'<td>{link_cell}</td></tr>'
-                )
-            rows_html = ''.join(rows) if rows else '<tr><td colspan="4" class="empty">还没有任务，提交一个试试吧</td></tr>'
-            body = (
-                '<header class="hero">'
-                '<h1>Baidu → OpenList</h1>'
-                '<p>把百度网盘分享转存到临时目录，生成可直接下载的链接</p>'
-                '<p><a class="back" href="' + href('/logout') + '">退出登录</a></p>'
-                '</header>'
-                f'<form class="card" method="post" action="{href("/submit")}{token_q}">'
-                '<h2>新建任务</h2>'
-                '<div class="form-row"><textarea name="text" placeholder="粘贴百度分享链接，可包含提取码"></textarea></div>'
-                '<div class="form-row"><input name="code" placeholder="提取码（留空自动识别）"></div>'
-                '<div class="row-actions"><button type="submit">提交下载</button>'
-                '<span class="note">默认 24 小时后自动从百度网盘删除临时目录</span></div>'
-                '</form>'
-                '<section class="card">'
-                '<h2>最近任务</h2>'
-                '<table><thead><tr><th>任务</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead>'
-                f'<tbody>{rows_html}</tbody></table>'
-                '</section>'
-            )
-            self.send_html(render_page('Baidu OpenList', body))
+            self.send_html(bridge_home_page(role, subject))
         elif path.startswith('/progress/'):
             jid = path.rsplit('/', 1)[-1]
             try:
                 job = load_job(jid)
+                if not self.require_job_access(job):
+                    self.send_html(render_page('无权访问', '<header class="hero"><h1>403</h1><p>你不能访问这个任务。</p></header>'), 403); return
                 token_q = ''
                 p = job.get('download_progress') or {}
                 active = bool(p.get('active'))
@@ -967,6 +1038,8 @@ class Handler(BaseHTTPRequestHandler):
             jid = path.rsplit('/', 1)[-1]
             try:
                 job = load_job(jid)
+                if not self.require_job_access(job):
+                    self.send_html('forbidden', 403); return
                 if job.get('status') == 'zip_ready':
                     self.send_html('ready'); return
                 if job.get('status') == 'zip_failed':
@@ -987,6 +1060,8 @@ class Handler(BaseHTTPRequestHandler):
             jid = path.rsplit('/', 1)[-1]
             try:
                 job = load_job(jid)
+                if not self.require_job_access(job):
+                    self.send_html('forbidden', 403); return
                 zip_path = Path(job.get('zip_path') or '')
                 if not zip_path.exists():
                     self.send_html('ZIP 还没准备好', 404); return
@@ -1031,6 +1106,8 @@ class Handler(BaseHTTPRequestHandler):
             jid = path.rsplit('/', 1)[-1]
             try:
                 job = load_job(jid)
+                if not self.require_job_access(job):
+                    self.send_html('forbidden', 403); return
                 files = transferred_file_paths(job)
                 if len(files) != 1:
                     self.send_response(303)
@@ -1101,6 +1178,8 @@ class Handler(BaseHTTPRequestHandler):
             jid = path.rsplit('/',1)[-1]
             try:
                 job = load_job(jid)
+                if not self.require_job_access(job):
+                    self.send_html(render_page('无权访问', '<header class="hero"><h1>403</h1><p>你不能访问这个任务。</p></header>'), 403); return
                 log = (LOGS / f'{jid}.log').read_text(encoding='utf-8', errors='replace') if (LOGS / f'{jid}.log').exists() else ''
                 status = job.get('status', '')
                 token_q = ''
@@ -1160,21 +1239,49 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == '/guest' and GUEST_ENABLED:
             self.send_response(303)
-            self.set_session('guest', 2 * 3600)
-            self.send_header('Location', (BASE_PATH or '') + '/guest')
+            guest_id = secrets.token_urlsafe(18)
+            self.set_session('guest', 24 * 3600, guest_id)
+            self.send_header('Location', (BASE_PATH or '') + '/')
             self.end_headers()
             return
-        if not self.auth_ok():
+        role, subject = self.current_session()
+        if role not in ('admin', 'guest'):
             self.send_html(login_page(), 401); return
         if path != '/submit':
             self.send_html('not found', 404); return
+        if role == 'guest':
+            if not GUEST_ENABLED:
+                self.send_html('guest disabled', 403); return
+            if not subject:
+                self.redirect_to('/login'); return
         text = data.get('text', [''])[0]
         code = data.get('code', [''])[0].strip() or extract_code(text)
         share = safe_share(text)
         if not share.startswith('http'):
             self.send_html('没有识别到分享链接', 400); return
         jid = uuid.uuid4().hex[:12]
-        job = {'id': jid, 'status': 'queued', 'created_at': now(), 'share_url': share, 'code': code}
+        if role == 'guest':
+            allowed, remaining = consume_guest_quota(subject, jid)
+            if not allowed:
+                body = (
+                    '<header class="hero"><h1>今日体验次数已用完</h1>'
+                    f'<p>游客每天最多可以体验 {GUEST_DAILY_LIMIT} 次，请明天再来，或联系站点管理员。</p></header>'
+                    f'<section class="card"><a class="btn secondary" href="{app_url("/")}">返回</a></section>'
+                )
+                self.send_html(render_page('游客额度已用完', body), 429); return
+        else:
+            remaining = None
+        job = {
+            'id': jid,
+            'status': 'queued',
+            'created_at': now(),
+            'share_url': share,
+            'code': code,
+            'owner_role': role,
+            'owner_id': subject if role == 'guest' else '',
+        }
+        if role == 'guest':
+            job['guest_remaining_today'] = remaining
         save_job(job)
         q.put(jid)
         token_q = ''
