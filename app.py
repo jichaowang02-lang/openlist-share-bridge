@@ -359,6 +359,7 @@ def worker():
             job = load_job(job_id)
             job.update(status='running', started_at=now(), remote_kept=False)
             save_job(job)
+            update_progress(job_id, active=True, phase='正在创建百度临时目录', sent_bytes=0, current_index=0)
             append_log(job, '开始任务')
 
             out_dir = DOWNLOADS / job_id
@@ -368,11 +369,13 @@ def worker():
             code = job.get('code') or ''
 
             run_cmd_retry(job, [str(BIN), 'mkdir', remote_dir], attempts=4, delay=3, timeout=45)
+            update_progress(job_id, active=True, phase='正在转存百度分享', current_file=share)
             web_transfer(job, remote_dir)
             job['remote_dir'] = remote_dir
             job['status'] = 'transferred'
             save_job(job)
             openlist_path = OPENLIST_BAIDU_MOUNT.rstrip('/') + remote_dir
+            update_progress(job_id, active=True, phase='正在刷新 OpenList 文件列表', current_file=openlist_path)
             openlist_url = OPENLIST_SITE_URL.rstrip('/') + openlist_path
             file_paths = transferred_file_paths(job)
             openlist_direct_urls = [OPENLIST_SITE_URL.rstrip() + '/d' + OPENLIST_BAIDU_MOUNT.rstrip('/') + urllib.parse.quote(x, safe='/') for x in file_paths]
@@ -390,6 +393,7 @@ def worker():
             )
             append_log(job, f'转存完成，请用 OpenList 访问: {openlist_url}')
             save_job(job)
+            update_progress(job_id, active=False, phase='已准备好，可以下载', sent_bytes=0)
         except Exception as e:
             try:
                 job = load_job(job_id)
@@ -418,11 +422,27 @@ def update_progress(job_id, **fields):
 
 def progress_html(job):
     p = job.get('download_progress') or {}
+    status = job.get('status') or ''
     total_files = int(p.get('total_files') or 0)
     current_index = int(p.get('current_index') or 0)
     total_bytes = int(p.get('total_bytes') or 0)
     sent = int(p.get('sent_bytes') or 0)
-    if total_bytes > 0:
+    if status in ('ready', 'zip_ready'):
+        pct = 100
+        label = '100% · 已准备好'
+    elif status in ('failed', 'zip_failed', 'download_failed'):
+        pct = 100
+        label = '失败'
+    elif status in ('downloaded_deleted', 'expired'):
+        pct = 100
+        label = '已完成并清理'
+    elif status == 'queued':
+        pct = 5
+        label = '排队中'
+    elif status == 'running':
+        pct = 18
+        label = str(p.get('phase') or '处理中')
+    elif total_bytes > 0:
         pct = min(100, int(sent * 100 / total_bytes))
         label = f'{pct}% · {sent/1024/1024:.1f}MB / {total_bytes/1024/1024:.1f}MB'
     elif total_files > 0:
@@ -825,7 +845,7 @@ def login_page(error=''):
     return render_page('登录 · OpenList Share Bridge', body)
 
 
-def bridge_home_page(role, subject):
+def bridge_home_page(role, subject, submitted=''):
     def href(target):
         return app_url(target)
     token_q = ''
@@ -854,22 +874,33 @@ def bridge_home_page(role, subject):
         rows.append(
             f'<tr><td><a class="mono" href="{href("/job/" + jid)}{token_q}">{jid}</a></td>'
             f'<td><span class="badge {html.escape(status)}">{html.escape(status) or "—"}</span></td>'
+            f'<td>{progress_html(job)}</td>'
             f'<td class="mono" style="color:var(--text-muted)">{html.escape(fmt_time(job.get("created_at","")))}</td>'
             f'<td>{link_cell}</td></tr>'
         )
         if len(rows) >= 30:
             break
-    rows_html = ''.join(rows) if rows else '<tr><td colspan="4" class="empty">还没有任务，提交一个试试吧</td></tr>'
+    rows_html = ''.join(rows) if rows else '<tr><td colspan="5" class="empty">还没有任务，提交一个试试吧</td></tr>'
     guest_note = ''
     if is_guest:
         guest_note = f'<section class="card"><h2>游客额度</h2><p class="note">今天还可以体验 {quota} / {GUEST_DAILY_LIMIT} 次。游客任务只对当前浏览器会话可见。</p></section>'
+    submitted_note = ''
+    if submitted:
+        submitted_note = (
+            '<section class="card">'
+            '<h2>任务已提交</h2>'
+            f'<p class="note">任务 <span class="mono">{html.escape(submitted)}</span> 已加入队列，下面会自动刷新进度。</p>'
+            '</section>'
+        )
     body = (
+        '<meta http-equiv="refresh" content="2">'
         '<header class="hero">'
         '<h1>Baidu → OpenList</h1>'
         '<p>把百度网盘分享转存到临时目录，生成可直接下载的链接</p>'
         '<p><a class="back" href="' + href('/logout') + '">退出登录</a></p>'
         '</header>'
         f'{guest_note}'
+        f'{submitted_note}'
         f'<form class="card" method="post" action="{href("/submit")}{token_q}">'
         '<h2>新建任务</h2>'
         '<div class="form-row"><textarea name="text" placeholder="粘贴百度分享链接，可包含提取码"></textarea></div>'
@@ -879,7 +910,7 @@ def bridge_home_page(role, subject):
         '</form>'
         '<section class="card">'
         '<h2>最近任务</h2>'
-        '<table><thead><tr><th>任务</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead>'
+        '<table><thead><tr><th>任务</th><th>状态</th><th>进度</th><th>创建时间</th><th>操作</th></tr></thead>'
         f'<tbody>{rows_html}</tbody></table>'
         '</section>'
     )
@@ -992,7 +1023,8 @@ class Handler(BaseHTTPRequestHandler):
             if role != 'guest':
                 self.send_html(login_page(), 401); return
         if path == '/':
-            self.send_html(bridge_home_page(role, subject))
+            submitted = parse_qs(parsed.query).get('submitted', [''])[0]
+            self.send_html(bridge_home_page(role, subject, submitted))
         elif path.startswith('/progress/'):
             jid = path.rsplit('/', 1)[-1]
             try:
@@ -1284,9 +1316,8 @@ class Handler(BaseHTTPRequestHandler):
             job['guest_remaining_today'] = remaining
         save_job(job)
         q.put(jid)
-        token_q = ''
         self.send_response(303)
-        self.send_header('Location', f'{BASE_PATH}/job/{jid}{token_q}' if BASE_PATH else f'/job/{jid}{token_q}')
+        self.send_header('Location', f'{BASE_PATH}/?submitted={urllib.parse.quote(jid)}' if BASE_PATH else f'/?submitted={urllib.parse.quote(jid)}')
         self.end_headers()
 
 
