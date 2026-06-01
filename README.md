@@ -29,25 +29,6 @@ OpenList Share Bridge is a lightweight self-hosted helper for people who already
 5. The service downloads through OpenList's API and streams the file to the browser.
 6. The temporary Baidu folder is deleted after the task finishes, even if the task fails.
 
-## Repository Name
-
-Recommended GitHub repository name:
-
-```text
-openlist-share-bridge
-```
-
-Why this name works:
-
-- It is not limited to Baidu, so future cloud-drive adapters fit naturally.
-- It explains the job clearly: bridging share links into OpenList.
-- It is short enough for CLI commands, Docker images, and GitHub URLs.
-
-Other workable names:
-
-- `openlist-share-gateway`
-- `share2openlist`
-- `cloud-share-bridge`
 
 ## Requirements
 

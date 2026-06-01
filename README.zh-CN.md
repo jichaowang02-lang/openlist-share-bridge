@@ -27,26 +27,6 @@ OpenList Share Bridge 是一个自托管的小工具，适合已经在服务器�
 5. 服务通过 OpenList API 解析下载地址，并把文件流式传给浏览器。
 6. 任务结束后，不管成功还是失败，都会删除临时目录。
 
-## 仓库名建议
-
-推荐仓库名：
-
-```text
-openlist-share-bridge
-```
-
-这个名字的好处是：
-
-- 不局限于百度网盘，后面接阿里云盘、夸克、123 云盘也自然。
-- 含义清楚：把分享链接桥接到 OpenList。
-- 名字短，适合 GitHub、Docker 镜像和命令行使用。
-
-其他可选名字：
-
-- `openlist-share-gateway`
-- `share2openlist`
-- `cloud-share-bridge`
-
 ## 环境要求
 
 - Linux 服务器
