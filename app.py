@@ -805,6 +805,32 @@ def guest_global_usage_file(day=None):
     return GUEST_USAGE / f'{day}-global.json'
 
 
+def guest_daily_settings_file(day=None):
+    day = day or datetime.now().strftime('%Y%m%d')
+    return GUEST_USAGE / f'{day}-settings.json'
+
+
+def guest_global_daily_limit():
+    path = guest_daily_settings_file()
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding='utf-8'))
+            return max(0, int(data.get('global_limit', GUEST_GLOBAL_DAILY_LIMIT)))
+        except Exception:
+            pass
+    return GUEST_GLOBAL_DAILY_LIMIT
+
+
+def save_guest_global_daily_limit(limit):
+    limit = max(0, int(limit))
+    path = guest_daily_settings_file()
+    tmp = path.with_suffix('.tmp')
+    with tmp.open('w', encoding='utf-8') as f:
+        json.dump({'global_limit': limit, 'updated_at': now()}, f, ensure_ascii=False, indent=2)
+    tmp.replace(path)
+    return limit
+
+
 def load_guest_usage(quota_key):
     path = guest_usage_file(quota_key)
     if not path.exists():
@@ -845,12 +871,13 @@ def consume_guest_quota(quota_key, job_id):
     with lock:
         usage = load_guest_usage(quota_key)
         global_usage = load_guest_global_usage()
+        global_limit = guest_global_daily_limit()
         count = int(usage.get('count') or 0)
         global_count = int(global_usage.get('count') or 0)
-        if global_count >= GUEST_GLOBAL_DAILY_LIMIT:
-            return False, max(0, GUEST_DAILY_LIMIT - count), max(0, GUEST_GLOBAL_DAILY_LIMIT - global_count), 'global'
+        if global_count >= global_limit:
+            return False, max(0, GUEST_DAILY_LIMIT - count), max(0, global_limit - global_count), 'global'
         if count >= GUEST_DAILY_LIMIT:
-            return False, max(0, GUEST_DAILY_LIMIT - count), max(0, GUEST_GLOBAL_DAILY_LIMIT - global_count), 'user'
+            return False, max(0, GUEST_DAILY_LIMIT - count), max(0, global_limit - global_count), 'user'
         usage['count'] = count + 1
         jobs = usage.get('jobs') or []
         jobs.append(job_id)
@@ -861,7 +888,7 @@ def consume_guest_quota(quota_key, job_id):
         global_jobs.append(job_id)
         global_usage['jobs'] = global_jobs[-1000:]
         save_guest_global_usage(global_usage)
-        return True, max(0, GUEST_DAILY_LIMIT - usage['count']), max(0, GUEST_GLOBAL_DAILY_LIMIT - global_usage['count']), ''
+        return True, max(0, GUEST_DAILY_LIMIT - usage['count']), max(0, global_limit - global_usage['count']), ''
 
 
 def guest_quota_remaining(quota_key):
@@ -871,7 +898,7 @@ def guest_quota_remaining(quota_key):
 
 def guest_global_quota_remaining():
     usage = load_guest_global_usage()
-    return max(0, GUEST_GLOBAL_DAILY_LIMIT - int(usage.get('count') or 0))
+    return max(0, guest_global_daily_limit() - int(usage.get('count') or 0))
 
 
 def stable_hash(value):
@@ -887,7 +914,7 @@ def guest_usage_summary(day=None):
     rows = []
     for p in GUEST_USAGE.glob(f'{day}-*.json'):
         key = p.stem[len(day) + 1:]
-        if key == 'global':
+        if key in ('global', 'settings'):
             continue
         try:
             usage = json.loads(p.read_text(encoding='utf-8'))
@@ -969,13 +996,14 @@ def bridge_home_page(role, subject, submitted='', quota_key=''):
     is_guest = role == 'guest'
     quota = guest_quota_remaining(quota_key) if is_guest else None
     global_quota = guest_global_quota_remaining()
+    global_limit = guest_global_daily_limit()
     rows_html = task_rows_html(role, subject)
     guest_note = ''
     if is_guest:
         guest_note = (
             '<section class="card">'
             '<h2>今日额度</h2>'
-            f'<p class="note">公益池今日剩余 <strong><span id="global-quota">{global_quota}</span> / {GUEST_GLOBAL_DAILY_LIMIT}</strong> 次；'
+            f'<p class="note">公益池今日剩余 <strong><span id="global-quota">{global_quota}</span> / <span id="global-limit">{global_limit}</span></strong> 次；'
             f'你今天还可以使用 <strong><span id="guest-quota">{quota}</span> / {GUEST_DAILY_LIMIT}</strong> 次。</p>'
             '</section>'
         )
@@ -1049,6 +1077,7 @@ def guest_page(subject='', quota_key=''):
 def admin_dashboard_page():
     global_usage = load_guest_global_usage()
     global_count = int(global_usage.get('count') or 0)
+    global_limit = guest_global_daily_limit()
     user_rows = []
     for item in guest_usage_summary()[:100]:
         last_jobs = ', '.join(html.escape(x) for x in item['jobs'][-5:])
@@ -1069,7 +1098,11 @@ def admin_dashboard_page():
         '</header>'
         '<section class="card">'
         '<h2>今日总额度</h2>'
-        f'<p class="note">今天已使用 <strong>{global_count}</strong> 次，剩余 <strong>{max(0, GUEST_GLOBAL_DAILY_LIMIT - global_count)}</strong> / {GUEST_GLOBAL_DAILY_LIMIT} 次。</p>'
+        f'<p class="note">今天已使用 <strong>{global_count}</strong> 次，剩余 <strong>{max(0, global_limit - global_count)}</strong> / {global_limit} 次。</p>'
+        f'<form method="post" action="{app_url("/admin/quota")}" style="margin-top:14px">'
+        '<div class="form-row"><input name="global_limit" type="number" min="0" step="1" placeholder="今天总额度" value="' + html.escape(str(global_limit)) + '"></div>'
+        '<div class="row-actions"><button type="submit">更新今日总额度</button><span class="note">只影响今天，明天默认回到环境变量配置。</span></div>'
+        '</form>'
         '</section>'
         '<section class="card">'
         '<h2>游客使用排行</h2>'
@@ -1470,6 +1503,16 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self.send_html(admin_login_page('账号或密码不正确'), 401)
             return
+        if path == '/admin/quota':
+            role, _ = self.current_session()
+            if role != 'admin':
+                self.redirect_to('/admin/login'); return
+            try:
+                save_guest_global_daily_limit(data.get('global_limit', [''])[0])
+            except Exception:
+                self.send_html(render_page('额度设置失败', '<header class="hero"><h1>额度设置失败</h1><p>请输入 0 或更大的整数。</p></header>'), 400)
+                return
+            self.redirect_to('/admin'); return
         if path == '/guest' and GUEST_ENABLED:
             self.send_response(303)
             guest_id = secrets.token_urlsafe(18)
@@ -1499,7 +1542,7 @@ class Handler(BaseHTTPRequestHandler):
             if not allowed:
                 title = '今日公益额度已用完' if limit_reason == 'global' else '你的今日次数已用完'
                 message = (
-                    f'公益池今天最多可转存 {GUEST_GLOBAL_DAILY_LIMIT} 次，请明天再来。'
+                    f'公益池今天最多可转存 {guest_global_daily_limit()} 次，请明天再来。'
                     if limit_reason == 'global'
                     else f'每个用户每天最多可以体验 {GUEST_DAILY_LIMIT} 次，请明天再来。'
                 )
