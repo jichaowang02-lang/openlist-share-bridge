@@ -8,6 +8,10 @@ OpenList Share Bridge is a lightweight self-hosted helper for people who already
 
 > Baidu Netdisk is implemented first. The project is expected to evolve toward a multi-provider adapter model.
 
+## Community
+
+Thanks to the [linux.do](https://linux.do/) community for the discussions, ideas, and encouragement around self-hosted tools and open-source sharing.
+
 ## Features
 
 - Paste Baidu Netdisk share text directly, including links copied from the Baidu app.
