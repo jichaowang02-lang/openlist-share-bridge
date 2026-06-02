@@ -165,7 +165,7 @@ BAIDU_OPENLIST_PAGE_SIZE=200
 - `BAIDU_OPENLIST_GUEST_GLOBAL_DAILY_LIMIT=100` 表示所有游客当天最多总共提交 100 个转存任务。
 - 游客只能看到自己的任务，管理员可以看到所有任务。
 - 公开首页是公益转存页；管理员入口是 `/baidu/admin/login`。
-- 管理员可以在后台直接修改今天的全站总额度，不需要重启服务。
+- 管理员可以在后台直接修改长期生效的每日全站总额度，不需要重启服务。
 
 ## Nginx 和 HTTPS
 

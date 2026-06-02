@@ -165,7 +165,7 @@ Login notes:
 - `BAIDU_OPENLIST_GUEST_GLOBAL_DAILY_LIMIT=100` limits all guests combined to 100 transfer tasks per day.
 - Guests can only see their own tasks. Admins can see all tasks.
 - The public homepage is the guest charity-transfer page. Admin login is at `/baidu/admin/login`.
-- Admins can override today's global quota from the admin dashboard without restarting the service.
+- Admins can update the persistent daily global quota from the admin dashboard without restarting the service.
 
 ## Nginx and HTTPS
 

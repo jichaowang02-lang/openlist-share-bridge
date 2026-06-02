@@ -810,12 +810,25 @@ def guest_daily_settings_file(day=None):
     return GUEST_USAGE / f'{day}-settings.json'
 
 
+def guest_global_settings_file():
+    return GUEST_USAGE / 'settings.json'
+
+
 def guest_global_daily_limit():
-    path = guest_daily_settings_file()
+    path = guest_global_settings_file()
     if path.exists():
         try:
             data = json.loads(path.read_text(encoding='utf-8'))
             return max(0, int(data.get('global_limit', GUEST_GLOBAL_DAILY_LIMIT)))
+        except Exception:
+            pass
+    old_today = guest_daily_settings_file()
+    if old_today.exists():
+        try:
+            data = json.loads(old_today.read_text(encoding='utf-8'))
+            limit = max(0, int(data.get('global_limit', GUEST_GLOBAL_DAILY_LIMIT)))
+            save_guest_global_daily_limit(limit)
+            return limit
         except Exception:
             pass
     return GUEST_GLOBAL_DAILY_LIMIT
@@ -823,7 +836,7 @@ def guest_global_daily_limit():
 
 def save_guest_global_daily_limit(limit):
     limit = max(0, int(limit))
-    path = guest_daily_settings_file()
+    path = guest_global_settings_file()
     tmp = path.with_suffix('.tmp')
     with tmp.open('w', encoding='utf-8') as f:
         json.dump({'global_limit': limit, 'updated_at': now()}, f, ensure_ascii=False, indent=2)
@@ -1097,11 +1110,11 @@ def admin_dashboard_page():
         '<p><a class="back" href="' + app_url('/') + '">返回首页</a> · <a class="back" href="' + app_url('/logout') + '">退出登录</a></p>'
         '</header>'
         '<section class="card">'
-        '<h2>今日总额度</h2>'
+        '<h2>每日总额度</h2>'
         f'<p class="note">今天已使用 <strong>{global_count}</strong> 次，剩余 <strong>{max(0, global_limit - global_count)}</strong> / {global_limit} 次。</p>'
         f'<form method="post" action="{app_url("/admin/quota")}" style="margin-top:14px">'
-        '<div class="form-row"><input name="global_limit" type="number" min="0" step="1" placeholder="今天总额度" value="' + html.escape(str(global_limit)) + '"></div>'
-        '<div class="row-actions"><button type="submit">更新今日总额度</button><span class="note">只影响今天，明天默认回到环境变量配置。</span></div>'
+        '<div class="form-row"><input name="global_limit" type="number" min="0" step="1" placeholder="每日总额度" value="' + html.escape(str(global_limit)) + '"></div>'
+        '<div class="row-actions"><button type="submit">更新每日总额度</button><span class="note">长期生效，后续每天都会使用这个额度。</span></div>'
         '</form>'
         '</section>'
         '<section class="card">'
