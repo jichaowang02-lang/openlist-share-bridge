@@ -45,6 +45,7 @@ REMOTE_ROOT = '/__openlist_tmp'
 TTL_SECONDS = int(os.environ.get('BAIDU_OPENLIST_TTL_SECONDS', '86400'))
 PORT = int(os.environ.get('BAIDU_OPENLIST_PORT', '9801'))
 TOKEN = os.environ.get('BAIDU_OPENLIST_TOKEN', '')
+ADMIN_USERNAME = os.environ.get('BAIDU_OPENLIST_ADMIN_USERNAME', 'admin')
 ADMIN_PASSWORD = os.environ.get('BAIDU_OPENLIST_ADMIN_PASSWORD', TOKEN)
 SESSION_SECRET = os.environ.get('BAIDU_OPENLIST_SESSION_SECRET', TOKEN or secrets.token_urlsafe(32))
 GUEST_ENABLED = os.environ.get('BAIDU_OPENLIST_GUEST_ENABLED', '1') != '0'
@@ -905,6 +906,10 @@ def role_can_access_job(role, subject, job):
     return role == 'admin' or (role == 'guest' and subject and job.get('owner_role') == 'guest' and job.get('owner_id') == subject)
 
 
+def strip_query(url):
+    return url.split('?', 1)[0]
+
+
 def task_rows_html(role, subject):
     rows = []
     for jf in sorted(JOBS.glob('*.json'), key=lambda p: p.stat().st_mtime, reverse=True)[:80]:
@@ -914,7 +919,7 @@ def task_rows_html(role, subject):
         jid = html.escape(job['id'])
         status = job.get('status', '')
         if job.get('direct_urls') and len(job.get('direct_urls', [])) == 1:
-            link_cell = f'<a class="btn" href="{html.escape(job["direct_urls"][0])}" download>直接下载</a>'
+            link_cell = f'<a class="btn" href="{html.escape(strip_query(job["direct_urls"][0]))}" download>直接下载</a>'
         elif job.get('openlist_url'):
             link_cell = (
                 '<div class="row-actions">'
@@ -948,6 +953,7 @@ def admin_login_page(error=''):
         f'{error_html}'
         '<section class="card">'
         f'<form method="post" action="{app_url("/admin/login")}">'
+        '<div class="form-row"><input name="username" placeholder="管理员账号"></div>'
         '<div class="form-row"><input type="password" name="password" placeholder="管理员密码"></div>'
         '<div class="row-actions"><button type="submit">登录</button></div>'
         '</form>'
@@ -1404,7 +1410,7 @@ class Handler(BaseHTTPRequestHandler):
                 token_q = ''
                 actions = []
                 if job.get('direct_urls') and len(job.get('direct_urls', [])) == 1:
-                    actions.append(f'<a class="btn" href="{html.escape(job["direct_urls"][0])}" download>直接下载文件</a>')
+                    actions.append(f'<a class="btn" href="{html.escape(strip_query(job["direct_urls"][0]))}" download>直接下载文件</a>')
                 elif job.get('openlist_url'):
                     actions.append(f'<a class="btn" href="{href("/download/" + jid)}{token_q}" download>下载 ZIP</a>')
                 if job.get('openlist_url'):
@@ -1413,7 +1419,7 @@ class Handler(BaseHTTPRequestHandler):
                 if job.get('direct_urls') and len(job.get('direct_urls', [])) > 1:
                     items = ''.join(
                         f'<li style="margin:8px 0"><a class="btn" href="{html.escape(u)}" download>{html.escape(urllib.parse.unquote(u.rsplit("/",1)[-1]))}</a></li>'
-                        for u in job.get('direct_urls', [])
+                        for u in [strip_query(x) for x in job.get('direct_urls', [])]
                     )
                     files_card = f'<section class="card"><h2>文件列表</h2><ul style="list-style:none;padding:0;margin:0">{items}</ul></section>'
                 if actions:
@@ -1449,14 +1455,20 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/login':
             self.redirect_to('/admin/login'); return
         if path == '/admin/login':
+            username = data.get('username', [''])[0]
             password = data.get('password', [''])[0]
-            if ADMIN_PASSWORD and hmac.compare_digest(password, ADMIN_PASSWORD):
+            if (
+                ADMIN_USERNAME
+                and ADMIN_PASSWORD
+                and hmac.compare_digest(username, ADMIN_USERNAME)
+                and hmac.compare_digest(password, ADMIN_PASSWORD)
+            ):
                 self.send_response(303)
                 self.set_session('admin', 7 * 86400)
                 self.send_header('Location', (BASE_PATH or '') + '/admin')
                 self.end_headers()
                 return
-            self.send_html(admin_login_page('密码不正确'), 401)
+            self.send_html(admin_login_page('账号或密码不正确'), 401)
             return
         if path == '/guest' and GUEST_ENABLED:
             self.send_response(303)

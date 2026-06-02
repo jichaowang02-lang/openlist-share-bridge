@@ -130,6 +130,7 @@ Example:
 BAIDU_OPENLIST_PORT=9801
 BAIDU_OPENLIST_TTL_SECONDS=86400
 BAIDU_OPENLIST_TOKEN=change-this-ui-token
+BAIDU_OPENLIST_ADMIN_USERNAME=admin
 BAIDU_OPENLIST_ADMIN_PASSWORD=change-this-admin-password
 BAIDU_OPENLIST_SESSION_SECRET=change-this-random-session-secret
 BAIDU_OPENLIST_GUEST_ENABLED=1
@@ -156,7 +157,7 @@ Do not commit real environment files, browser cookies, access tokens, account cr
 
 Login notes:
 
-- `BAIDU_OPENLIST_ADMIN_PASSWORD` is the admin login password.
+- `BAIDU_OPENLIST_ADMIN_USERNAME` and `BAIDU_OPENLIST_ADMIN_PASSWORD` are the admin login credentials.
 - If `BAIDU_OPENLIST_ADMIN_PASSWORD` is not set, the service falls back to `BAIDU_OPENLIST_TOKEN`.
 - `BAIDU_OPENLIST_SESSION_SECRET` signs browser session cookies. Use a long random value.
 - `BAIDU_OPENLIST_GUEST_ENABLED=1` enables guest access.
