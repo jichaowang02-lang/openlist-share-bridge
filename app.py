@@ -51,6 +51,10 @@ SESSION_SECRET = os.environ.get('BAIDU_OPENLIST_SESSION_SECRET', TOKEN or secret
 GUEST_ENABLED = os.environ.get('BAIDU_OPENLIST_GUEST_ENABLED', '1') != '0'
 GUEST_DAILY_LIMIT = int(os.environ.get('BAIDU_OPENLIST_GUEST_DAILY_LIMIT', '3'))
 GUEST_GLOBAL_DAILY_LIMIT = int(os.environ.get('BAIDU_OPENLIST_GUEST_GLOBAL_DAILY_LIMIT', '100'))
+GUEST_MAX_SINGLE_FILE_BYTES = int(os.environ.get('BAIDU_OPENLIST_GUEST_MAX_SINGLE_FILE_BYTES', str(10 * 1024 * 1024 * 1024)))
+GUEST_COOLDOWN_SECONDS = int(os.environ.get('BAIDU_OPENLIST_GUEST_COOLDOWN_SECONDS', '60'))
+GUEST_MAX_ACTIVE_TASKS = int(os.environ.get('BAIDU_OPENLIST_GUEST_MAX_ACTIVE_TASKS', '2'))
+GUEST_MAX_ACTIVE_TASKS_PER_USER = int(os.environ.get('BAIDU_OPENLIST_GUEST_MAX_ACTIVE_TASKS_PER_USER', '1'))
 BASE_PATH = os.environ.get('BAIDU_OPENLIST_BASE_PATH', '').rstrip('/')
 OPENLIST_BAIDU_MOUNT = os.environ.get('BAIDU_OPENLIST_MOUNT', '/baidu')
 OPENLIST_SITE_URL = os.environ.get('BAIDU_OPENLIST_SITE_URL', 'https://disk.example.com/openlist')
@@ -298,6 +302,49 @@ def get_openlist_raw_url(openlist_path):
     return raw
 
 
+def openlist_get(openlist_path, refresh=True):
+    resp = requests.post(
+        OPENLIST_API.rstrip('/') + '/api/fs/get',
+        headers={'Authorization': OPENLIST_ADMIN_TOKEN, 'Content-Type': 'application/json'},
+        json={'path': openlist_path, 'password': '', 'refresh': refresh},
+        timeout=20,
+    )
+    data = resp.json()
+    if data.get('code') != 200 and openlist_path.count('/') > 2:
+        parent = openlist_path.rsplit('/', 1)[0]
+        parts = [x for x in parent.split('/') if x]
+        try:
+            for i in range(1, len(parts) + 1):
+                requests.post(
+                    OPENLIST_API.rstrip('/') + '/api/fs/list',
+                    headers={'Authorization': OPENLIST_ADMIN_TOKEN, 'Content-Type': 'application/json'},
+                    json={'path': '/' + '/'.join(parts[:i]), 'password': '', 'page': 1, 'per_page': 0, 'refresh': True},
+                    timeout=20,
+                )
+        except Exception:
+            pass
+        resp = requests.post(
+            OPENLIST_API.rstrip('/') + '/api/fs/get',
+            headers={'Authorization': OPENLIST_ADMIN_TOKEN, 'Content-Type': 'application/json'},
+            json={'path': openlist_path, 'password': '', 'refresh': True},
+            timeout=20,
+        )
+        data = resp.json()
+    if data.get('code') != 200:
+        raise RuntimeError('OpenList 获取文件信息失败: ' + json.dumps(data, ensure_ascii=False))
+    return data.get('data') or {}
+
+
+def file_size_label(size):
+    size = int(size or 0)
+    units = ['B', 'KB', 'MB', 'GB', 'TB']
+    value = float(size)
+    for unit in units:
+        if value < 1024 or unit == units[-1]:
+            return f'{value:.1f}{unit}' if unit != 'B' else f'{size}B'
+        value /= 1024
+
+
 def has_enough_zip_space(required_bytes):
     if not required_bytes:
         return True, shutil.disk_usage(ZIP_CACHE).free
@@ -398,6 +445,8 @@ def worker():
             save_job(job)
             openlist_path = OPENLIST_BAIDU_MOUNT.rstrip('/') + remote_dir
             update_progress(job_id, active=True, phase='正在刷新 OpenList 文件列表', current_file=openlist_path)
+            assert_guest_transfer_allowed(job)
+            save_job(job)
             openlist_url = OPENLIST_SITE_URL.rstrip('/') + openlist_path
             file_paths = transferred_file_paths(job)
             openlist_direct_urls = [OPENLIST_SITE_URL.rstrip() + '/d' + OPENLIST_BAIDU_MOUNT.rstrip('/') + urllib.parse.quote(x, safe='/') for x in file_paths]
@@ -502,6 +551,39 @@ def job_file_items(job):
 
 def job_has_dirs(job):
     return transferred_has_dirs(job) or (job.get('openlist_path') and not job_file_items(job))
+
+
+def assert_guest_transfer_allowed(job):
+    if job.get('owner_role') != 'guest':
+        return
+    paths = []
+    for item in job.get('transferred_files') or []:
+        if isinstance(item, str):
+            paths.append(item)
+        elif isinstance(item, dict) and item.get('path'):
+            paths.append(item['path'])
+        elif isinstance(item, dict) and item.get('to'):
+            paths.append(item['to'])
+    if len(paths) != 1:
+        raise RuntimeError('游客模式只允许转存单个文件，暂不支持文件夹或多个文件。')
+    openlist_path = OPENLIST_BAIDU_MOUNT.rstrip('/') + paths[0]
+    info = openlist_get(openlist_path, refresh=True)
+    if info.get('is_dir'):
+        raise RuntimeError('游客模式只允许单文件下载，文件夹请使用管理员模式或拆成单个文件。')
+    size = int(info.get('size') or 0)
+    job['guest_file_size'] = size
+    job['guest_file_name'] = info.get('name') or paths[0].rsplit('/', 1)[-1]
+    job['transferred_files'] = [{
+        'path': paths[0],
+        'is_dir': False,
+        'size': size,
+        'name': job['guest_file_name'],
+    }]
+    if GUEST_MAX_SINGLE_FILE_BYTES and size > GUEST_MAX_SINGLE_FILE_BYTES:
+        raise RuntimeError(
+            f'游客单文件上限为 {file_size_label(GUEST_MAX_SINGLE_FILE_BYTES)}，'
+            f'当前文件约 {file_size_label(size)}。'
+        )
 
 
 def build_zip(job_id):
@@ -824,6 +906,44 @@ def guest_global_settings_file():
     return GUEST_USAGE / 'settings.json'
 
 
+def guest_bans_file():
+    return GUEST_USAGE / 'bans.json'
+
+
+def load_guest_bans():
+    path = guest_bans_file()
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_guest_bans(bans):
+    path = guest_bans_file()
+    tmp = path.with_suffix('.tmp')
+    with tmp.open('w', encoding='utf-8') as f:
+        json.dump(bans, f, ensure_ascii=False, indent=2)
+    tmp.replace(path)
+
+
+def is_guest_banned(quota_key):
+    bans = load_guest_bans()
+    item = bans.get(quota_key) or {}
+    return bool(item.get('banned'))
+
+
+def set_guest_ban(quota_key, banned, reason=''):
+    bans = load_guest_bans()
+    if banned:
+        bans[quota_key] = {'banned': True, 'reason': reason, 'updated_at': now()}
+    else:
+        bans.pop(quota_key, None)
+    save_guest_bans(bans)
+
+
 def guest_global_daily_limit():
     path = guest_global_settings_file()
     if path.exists():
@@ -905,6 +1025,7 @@ def consume_guest_quota(quota_key, job_id):
         jobs = usage.get('jobs') or []
         jobs.append(job_id)
         usage['jobs'] = jobs[-200:]
+        usage['last_submit_at'] = now()
         save_guest_usage(quota_key, usage)
         global_usage['count'] = global_count + 1
         global_jobs = global_usage.get('jobs') or []
@@ -935,6 +1056,7 @@ def today_key():
 def guest_usage_summary(day=None):
     day = day or today_key()
     rows = []
+    bans = load_guest_bans()
     for p in GUEST_USAGE.glob(f'{day}-*.json'):
         key = p.stem[len(day) + 1:]
         if key in ('global', 'settings'):
@@ -947,13 +1069,52 @@ def guest_usage_summary(day=None):
             'key': key,
             'count': int(usage.get('count') or 0),
             'jobs': usage.get('jobs') or [],
+            'last_submit_at': usage.get('last_submit_at') or '',
+            'banned': bool((bans.get(key) or {}).get('banned')),
             'mtime': p.stat().st_mtime,
         })
     return sorted(rows, key=lambda x: (x['count'], x['mtime']), reverse=True)
 
 
+def active_guest_task_counts(quota_key=''):
+    active_statuses = {'queued', 'running', 'transferred', 'ready', 'zipping', 'zip_ready'}
+    total = 0
+    per_user = 0
+    for jf in JOBS.glob('*.json'):
+        try:
+            job = json.loads(jf.read_text(encoding='utf-8'))
+        except Exception:
+            continue
+        if job.get('owner_role') != 'guest' or job.get('status') not in active_statuses:
+            continue
+        total += 1
+        if quota_key and job.get('guest_quota_key') == quota_key:
+            per_user += 1
+    return total, per_user
+
+
+def guest_cooldown_remaining(quota_key):
+    if GUEST_COOLDOWN_SECONDS <= 0:
+        return 0
+    usage = load_guest_usage(quota_key)
+    last = usage.get('last_submit_at')
+    if not last:
+        return 0
+    try:
+        last_ts = datetime.fromisoformat(last).timestamp()
+    except Exception:
+        return 0
+    return max(0, int(GUEST_COOLDOWN_SECONDS - (time.time() - last_ts)))
+
+
 def role_can_access_job(role, subject, job):
     return role == 'admin' or (role == 'guest' and subject and job.get('owner_role') == 'guest' and job.get('owner_id') == subject)
+
+
+def role_can_download_job(role, subject, job):
+    if role == 'guest':
+        return subject and job.get('owner_role') == 'guest' and job.get('owner_id') == subject
+    return role == 'admin' and job.get('owner_role') != 'guest'
 
 
 def strip_query(url):
@@ -1134,15 +1295,23 @@ def admin_dashboard_page():
     user_rows = []
     for item in guest_usage_summary()[:100]:
         last_jobs = ', '.join(html.escape(x) for x in item['jobs'][-5:])
+        action = 'unban' if item.get('banned') else 'ban'
+        action_label = '解封' if item.get('banned') else '封禁'
+        ban_badge = '<span class="badge failed">已封禁</span>' if item.get('banned') else '<span style="color:var(--text-muted)">正常</span>'
         user_rows.append(
             '<tr>'
             f'<td class="mono">{html.escape(item["key"])}</td>'
             f'<td>{item["count"]}</td>'
             f'<td>{len(item["jobs"])}</td>'
             f'<td class="mono">{last_jobs or "—"}</td>'
+            f'<td>{ban_badge}</td>'
+            f'<td><form method="post" action="{app_url("/admin/ban")}" style="margin:0">'
+            f'<input type="hidden" name="quota_key" value="{html.escape(item["key"])}">'
+            f'<input type="hidden" name="action" value="{action}">'
+            f'<button class="secondary" type="submit">{action_label}</button></form></td>'
             '</tr>'
         )
-    users_html = ''.join(user_rows) if user_rows else '<tr><td colspan="4" class="empty">今天还没有游客使用记录</td></tr>'
+    users_html = ''.join(user_rows) if user_rows else '<tr><td colspan="6" class="empty">今天还没有游客使用记录</td></tr>'
     body = (
         '<header class="hero">'
         '<h1>管理员后台</h1>'
@@ -1158,8 +1327,15 @@ def admin_dashboard_page():
         '</form>'
         '</section>'
         '<section class="card">'
+        '<h2>防滥用规则</h2>'
+        f'<p class="note">游客单文件上限 <strong>{file_size_label(GUEST_MAX_SINGLE_FILE_BYTES)}</strong>；'
+        f'提交冷却 <strong>{GUEST_COOLDOWN_SECONDS}</strong> 秒；'
+        f'全站游客并发 <strong>{GUEST_MAX_ACTIVE_TASKS}</strong>；'
+        f'单个指纹并发 <strong>{GUEST_MAX_ACTIVE_TASKS_PER_USER}</strong>。</p>'
+        '</section>'
+        '<section class="card">'
         '<h2>游客使用排行</h2>'
-        '<table><thead><tr><th>用户指纹</th><th>使用次数</th><th>任务数</th><th>最近任务</th></tr></thead>'
+        '<table><thead><tr><th>用户指纹</th><th>使用次数</th><th>任务数</th><th>最近任务</th><th>状态</th><th>操作</th></tr></thead>'
         f'<tbody>{users_html}</tbody></table>'
         '</section>'
         '<section class="card">'
@@ -1351,6 +1527,9 @@ class Handler(BaseHTTPRequestHandler):
                 job = load_job(jid)
                 if not self.require_job_access(job):
                     self.send_html('forbidden', 403); return
+                role, subject = self.current_session()
+                if not role_can_download_job(role, subject, job):
+                    self.send_html('forbidden', 403); return
                 if job.get('status') == 'zip_ready':
                     self.send_html('ready'); return
                 if job.get('status') == 'zip_failed':
@@ -1372,6 +1551,9 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 job = load_job(jid)
                 if not self.require_job_access(job):
+                    self.send_html('forbidden', 403); return
+                role, subject = self.current_session()
+                if not role_can_download_job(role, subject, job):
                     self.send_html('forbidden', 403); return
                 zip_path = Path(job.get('zip_path') or '')
                 if not zip_path.exists():
@@ -1418,6 +1600,9 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 job = load_job(jid)
                 if not self.require_job_access(job):
+                    self.send_html('forbidden', 403); return
+                role, subject = self.current_session()
+                if not role_can_download_job(role, subject, job):
                     self.send_html('forbidden', 403); return
                 files = transferred_file_paths(job)
                 if len(files) != 1:
@@ -1495,14 +1680,16 @@ class Handler(BaseHTTPRequestHandler):
                 status = job.get('status', '')
                 token_q = ''
                 actions = []
-                if job.get('direct_urls') and len(job.get('direct_urls', [])) == 1:
-                    actions.append(f'<a class="btn" href="{html.escape(strip_query(job["direct_urls"][0]))}" download>直接下载文件</a>')
-                elif job.get('openlist_url'):
-                    actions.append(f'<a class="btn" href="{href("/download/" + jid)}{token_q}" download>下载 ZIP</a>')
-                if job.get('openlist_url'):
-                    actions.append(f'<a class="btn secondary" href="{html.escape(job["openlist_url"])}">打开目录</a>')
+                can_download = role_can_download_job(role, subject, job)
+                if can_download:
+                    if job.get('direct_urls') and len(job.get('direct_urls', [])) == 1:
+                        actions.append(f'<a class="btn" href="{html.escape(strip_query(job["direct_urls"][0]))}" download>直接下载文件</a>')
+                    elif job.get('openlist_url'):
+                        actions.append(f'<a class="btn" href="{href("/download/" + jid)}{token_q}" download>下载 ZIP</a>')
+                    if job.get('openlist_url'):
+                        actions.append(f'<a class="btn secondary" href="{html.escape(job["openlist_url"])}">打开目录</a>')
                 files_card = ''
-                if job.get('direct_urls') and len(job.get('direct_urls', [])) > 1:
+                if can_download and job.get('direct_urls') and len(job.get('direct_urls', [])) > 1:
                     items = ''.join(
                         f'<li style="margin:8px 0"><a class="btn" href="{html.escape(u)}" download>{html.escape(urllib.parse.unquote(u.rsplit("/",1)[-1]))}</a></li>'
                         for u in [strip_query(x) for x in job.get('direct_urls', [])]
@@ -1566,6 +1753,17 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_html(render_page('额度设置失败', '<header class="hero"><h1>额度设置失败</h1><p>请输入 0 或更大的整数。</p></header>'), 400)
                 return
             self.redirect_to('/admin'); return
+        if path == '/admin/ban':
+            role, _ = self.current_session()
+            if role != 'admin':
+                self.redirect_to('/admin/login'); return
+            quota_key = re.sub(r'[^A-Za-z0-9_-]', '', data.get('quota_key', [''])[0])[:80]
+            action = data.get('action', [''])[0]
+            if not quota_key:
+                self.send_html(render_page('操作失败', '<header class="hero"><h1>操作失败</h1><p>缺少用户指纹。</p></header>'), 400)
+                return
+            set_guest_ban(quota_key, action == 'ban', 'admin')
+            self.redirect_to('/admin'); return
         if path == '/guest' and GUEST_ENABLED:
             self.send_response(303)
             guest_id = secrets.token_urlsafe(18)
@@ -1591,6 +1789,36 @@ class Handler(BaseHTTPRequestHandler):
         jid = uuid.uuid4().hex[:12]
         if role == 'guest':
             quota_key = self.guest_quota_key()
+            if is_guest_banned(quota_key):
+                body = (
+                    '<header class="hero"><h1>访问受限</h1>'
+                    '<p>当前客户端已被管理员限制提交公益转存任务。</p></header>'
+                    f'<section class="card"><a class="btn secondary" href="{app_url("/")}">返回</a></section>'
+                )
+                self.send_html(render_page('访问受限', body), 403); return
+            cooldown = guest_cooldown_remaining(quota_key)
+            if cooldown > 0:
+                body = (
+                    '<header class="hero"><h1>提交太频繁了</h1>'
+                    f'<p>为了保护公益池，请 {cooldown} 秒后再提交新任务。</p></header>'
+                    f'<section class="card"><a class="btn secondary" href="{app_url("/")}">返回</a></section>'
+                )
+                self.send_html(render_page('提交冷却中', body), 429); return
+            active_total, active_user = active_guest_task_counts(quota_key)
+            if GUEST_MAX_ACTIVE_TASKS and active_total >= GUEST_MAX_ACTIVE_TASKS:
+                body = (
+                    '<header class="hero"><h1>公益池正在忙</h1>'
+                    f'<p>当前游客任务并发已达到 {GUEST_MAX_ACTIVE_TASKS} 个，请稍后再试。</p></header>'
+                    f'<section class="card"><a class="btn secondary" href="{app_url("/")}">返回</a></section>'
+                )
+                self.send_html(render_page('公益池忙碌', body), 429); return
+            if GUEST_MAX_ACTIVE_TASKS_PER_USER and active_user >= GUEST_MAX_ACTIVE_TASKS_PER_USER:
+                body = (
+                    '<header class="hero"><h1>已有任务在进行</h1>'
+                    f'<p>每个游客同时最多 {GUEST_MAX_ACTIVE_TASKS_PER_USER} 个任务，请等当前任务下载或清理后再提交。</p></header>'
+                    f'<section class="card"><a class="btn secondary" href="{app_url("/")}">返回</a></section>'
+                )
+                self.send_html(render_page('任务并发受限', body), 429); return
             allowed, remaining, global_remaining, limit_reason = consume_guest_quota(quota_key, jid)
             if not allowed:
                 title = '今日公益额度已用完' if limit_reason == 'global' else '你的今日次数已用完'

@@ -136,6 +136,10 @@ BAIDU_OPENLIST_SESSION_SECRET=change-this-random-session-secret
 BAIDU_OPENLIST_GUEST_ENABLED=1
 BAIDU_OPENLIST_GUEST_DAILY_LIMIT=3
 BAIDU_OPENLIST_GUEST_GLOBAL_DAILY_LIMIT=100
+BAIDU_OPENLIST_GUEST_MAX_SINGLE_FILE_BYTES=10737418240
+BAIDU_OPENLIST_GUEST_COOLDOWN_SECONDS=60
+BAIDU_OPENLIST_GUEST_MAX_ACTIVE_TASKS=2
+BAIDU_OPENLIST_GUEST_MAX_ACTIVE_TASKS_PER_USER=1
 BAIDU_OPENLIST_BASE_PATH=/baidu
 GODEBUG=http2client=0,netdns=cgo+1
 BAIDU_OPENLIST_FORCE_IPV4=1
@@ -163,9 +167,12 @@ Login notes:
 - `BAIDU_OPENLIST_GUEST_ENABLED=1` enables guest access.
 - `BAIDU_OPENLIST_GUEST_DAILY_LIMIT=3` lets each guest client fingerprint submit up to 3 real transfer/download tasks per day.
 - `BAIDU_OPENLIST_GUEST_GLOBAL_DAILY_LIMIT=100` limits all guests combined to 100 transfer tasks per day.
+- `BAIDU_OPENLIST_GUEST_MAX_SINGLE_FILE_BYTES=10737418240` limits guest submissions to one file up to 10 GiB by default. Guest folder shares are rejected and cleaned up automatically.
+- `BAIDU_OPENLIST_GUEST_COOLDOWN_SECONDS=60` adds a per-fingerprint submit cooldown.
+- `BAIDU_OPENLIST_GUEST_MAX_ACTIVE_TASKS=2` and `BAIDU_OPENLIST_GUEST_MAX_ACTIVE_TASKS_PER_USER=1` limit concurrent guest work.
 - Guests can only see their own tasks. Admins can see all tasks.
 - The public homepage is the guest charity-transfer page. Admin login is at `/baidu/admin/login`.
-- Admins can update the persistent daily global quota from the admin dashboard without restarting the service.
+- Admins can update the persistent daily global quota and ban/unban guest fingerprints from the admin dashboard without restarting the service.
 
 ## Nginx and HTTPS
 
