@@ -145,6 +145,20 @@ def run_pcs_rm(job, remote, attempts=5, delay=3):
     raise RuntimeError(last_output.strip().splitlines()[-1] if last_output.strip() else '删除临时目录未确认成功')
 
 
+def openlist_remove_path(openlist_path):
+    parent, name = openlist_path.rstrip('/').rsplit('/', 1)
+    resp = requests.post(
+        OPENLIST_API.rstrip('/') + '/api/fs/remove',
+        headers={'Authorization': OPENLIST_ADMIN_TOKEN, 'Content-Type': 'application/json'},
+        json={'dir': parent or '/', 'names': [name]},
+        timeout=60,
+    )
+    data = resp.json()
+    if data.get('code') != 200:
+        raise RuntimeError('OpenList 删除失败: ' + json.dumps(data, ensure_ascii=False))
+    return data
+
+
 def run_cmd_retry(job, args, attempts=3, delay=2, timeout=None):
     last_error = None
     for attempt in range(1, attempts + 1):
@@ -165,9 +179,15 @@ def delete_remote_temp(job, reason='任务结束'):
         return False, 'missing remote_dir'
     try:
         append_log(job, f'{reason}，删除百度网盘临时目录: {remote}')
-        run_pcs_rm(job, remote)
+        try:
+            run_pcs_rm(job, remote)
+        except Exception as pcs_error:
+            openlist_path = OPENLIST_BAIDU_MOUNT.rstrip('/') + remote
+            append_log(job, f'BaiduPCS-Go 删除失败，改用 OpenList 删除 {openlist_path}: {pcs_error}')
+            openlist_remove_path(openlist_path)
         job['remote_kept'] = False
         job['deleted_remote_at'] = now()
+        job.pop('cleanup_error', None)
         save_job(job)
         return True, ''
     except Exception as e:
@@ -572,13 +592,16 @@ def janitor():
                 try:
                     job = json.loads(jf.read_text(encoding='utf-8'))
                     exp = job.get('expires_at')
-                    if exp and exp < cutoff:
+                    should_retry_remote = bool(job.get('remote_kept') and job.get('remote_dir'))
+                    should_expire = bool(exp and exp < cutoff)
+                    if should_retry_remote and job.get('status') not in ('running', 'queued', 'zipping'):
+                        delete_remote_temp(job, '后台重试清理')
+                        job = json.loads(jf.read_text(encoding='utf-8'))
+                    if should_expire:
                         remote = job.get('remote_dir')
                         if remote:
-                            try:
-                                run_cmd(job, [str(BIN), 'rm', remote])
-                            except Exception:
-                                pass
+                            delete_remote_temp(job, '任务过期')
+                            job = json.loads(jf.read_text(encoding='utf-8'))
                         path = DOWNLOADS / job['id']
                         shutil.rmtree(path, ignore_errors=True)
                         job['status'] = 'expired'
