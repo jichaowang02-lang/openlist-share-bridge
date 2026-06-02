@@ -676,8 +676,26 @@ def janitor():
                 try:
                     job = json.loads(jf.read_text(encoding='utf-8'))
                     exp = job.get('expires_at')
+                    created_at = job.get('created_at') or ''
+                    stuck_running = False
+                    if job.get('status') in ('queued', 'running', 'zipping'):
+                        try:
+                            created_ts = datetime.fromisoformat(created_at).timestamp()
+                            stuck_running = cutoff - created_ts > 1800
+                        except Exception:
+                            stuck_running = False
                     should_retry_remote = bool(job.get('remote_kept') and job.get('remote_dir'))
                     should_expire = bool(exp and exp < cutoff)
+                    if stuck_running:
+                        append_log(job, '任务长时间未完成，后台自动释放并发名额')
+                        job['status'] = 'failed'
+                        job['finished_at'] = now()
+                        job['error'] = job.get('error') or '任务长时间未完成，已自动释放并发名额。'
+                        progress = job.get('download_progress') or {}
+                        progress.update({'active': False, 'phase': '任务超时释放', 'updated_at': now()})
+                        job['download_progress'] = progress
+                        save_job(job)
+                        job = json.loads(jf.read_text(encoding='utf-8'))
                     if should_retry_remote and job.get('status') not in ('running', 'queued', 'zipping'):
                         delete_remote_temp(job, '后台重试清理')
                         job = json.loads(jf.read_text(encoding='utf-8'))
@@ -1077,7 +1095,7 @@ def guest_usage_summary(day=None):
 
 
 def active_guest_task_counts(quota_key=''):
-    active_statuses = {'queued', 'running', 'transferred', 'ready', 'zipping', 'zip_ready'}
+    active_statuses = {'queued', 'running', 'zipping'}
     total = 0
     per_user = 0
     for jf in JOBS.glob('*.json'):
