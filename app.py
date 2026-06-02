@@ -657,8 +657,8 @@ html, body {
   margin-bottom: 20px;
 }
 .card h2 { font-size: 19px; font-weight: 600; margin: 0 0 16px; letter-spacing: -0.01em; }
-textarea, input[type="text"], input:not([type]) {
-  width: 100%; padding: 12px 14px; font: inherit; color: var(--text);
+textarea, input[type="text"], input[type="password"], input[type="number"], input:not([type]) {
+  width: 100%; min-height: 46px; padding: 12px 14px; font: inherit; color: var(--text);
   background: var(--surface-solid); border: 1px solid var(--border);
   border-radius: 12px; outline: none;
   transition: border-color .15s, box-shadow .15s;
@@ -667,6 +667,8 @@ textarea, input[type="text"], input:not([type]) {
 textarea:focus, input:focus { border-color: var(--accent); box-shadow: 0 0 0 4px rgba(0,113,227,0.15); }
 textarea { min-height: 110px; }
 .form-row { margin-bottom: 12px; }
+.login-card { max-width: 480px; margin: 0 auto 20px; padding: 28px; }
+.login-card button { width: 100%; min-height: 48px; font-size: 16px; margin-top: 4px; }
 button, .btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 6px;
   padding: 10px 20px; font: inherit; font-weight: 500;
@@ -991,7 +993,7 @@ def admin_login_page(error=''):
         '<p>查看公益转存额度、用户使用统计和后台任务。</p>'
         '</header>'
         f'{error_html}'
-        '<section class="card">'
+        '<section class="card login-card">'
         f'<form method="post" action="{app_url("/admin/login")}">'
         '<div class="form-row"><input name="username" placeholder="管理员账号"></div>'
         '<div class="form-row"><input type="password" name="password" placeholder="管理员密码"></div>'
@@ -1213,7 +1215,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_HEAD(self):
         parsed, path = self.normalize_path()
-        if path in ('/', '/login', '/guest'):
+        if path in ('/', '/login', '/guest', '/admin/login', '/admin'):
             self.send_response(200 if path != '/guest' or GUEST_ENABLED else 404)
         else:
             self.send_response(404)
