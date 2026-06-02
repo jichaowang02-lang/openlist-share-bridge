@@ -49,6 +49,7 @@ ADMIN_PASSWORD = os.environ.get('BAIDU_OPENLIST_ADMIN_PASSWORD', TOKEN)
 SESSION_SECRET = os.environ.get('BAIDU_OPENLIST_SESSION_SECRET', TOKEN or secrets.token_urlsafe(32))
 GUEST_ENABLED = os.environ.get('BAIDU_OPENLIST_GUEST_ENABLED', '1') != '0'
 GUEST_DAILY_LIMIT = int(os.environ.get('BAIDU_OPENLIST_GUEST_DAILY_LIMIT', '3'))
+GUEST_GLOBAL_DAILY_LIMIT = int(os.environ.get('BAIDU_OPENLIST_GUEST_GLOBAL_DAILY_LIMIT', '100'))
 BASE_PATH = os.environ.get('BAIDU_OPENLIST_BASE_PATH', '').rstrip('/')
 OPENLIST_BAIDU_MOUNT = os.environ.get('BAIDU_OPENLIST_MOUNT', '/baidu')
 OPENLIST_SITE_URL = os.environ.get('BAIDU_OPENLIST_SITE_URL', 'https://disk.example.com/openlist')
@@ -798,6 +799,11 @@ def guest_usage_file(quota_key, day=None):
     return GUEST_USAGE / f'{day}-{safe_id}.json'
 
 
+def guest_global_usage_file(day=None):
+    day = day or datetime.now().strftime('%Y%m%d')
+    return GUEST_USAGE / f'{day}-global.json'
+
+
 def load_guest_usage(quota_key):
     path = guest_usage_file(quota_key)
     if not path.exists():
@@ -816,18 +822,45 @@ def save_guest_usage(quota_key, usage):
     tmp.replace(path)
 
 
+def load_guest_global_usage():
+    path = guest_global_usage_file()
+    if not path.exists():
+        return {'count': 0, 'jobs': []}
+    try:
+        return json.loads(path.read_text(encoding='utf-8'))
+    except Exception:
+        return {'count': 0, 'jobs': []}
+
+
+def save_guest_global_usage(usage):
+    path = guest_global_usage_file()
+    tmp = path.with_suffix('.tmp')
+    with tmp.open('w', encoding='utf-8') as f:
+        json.dump(usage, f, ensure_ascii=False, indent=2)
+    tmp.replace(path)
+
+
 def consume_guest_quota(quota_key, job_id):
     with lock:
         usage = load_guest_usage(quota_key)
+        global_usage = load_guest_global_usage()
         count = int(usage.get('count') or 0)
+        global_count = int(global_usage.get('count') or 0)
+        if global_count >= GUEST_GLOBAL_DAILY_LIMIT:
+            return False, max(0, GUEST_DAILY_LIMIT - count), max(0, GUEST_GLOBAL_DAILY_LIMIT - global_count), 'global'
         if count >= GUEST_DAILY_LIMIT:
-            return False, max(0, GUEST_DAILY_LIMIT - count)
+            return False, max(0, GUEST_DAILY_LIMIT - count), max(0, GUEST_GLOBAL_DAILY_LIMIT - global_count), 'user'
         usage['count'] = count + 1
         jobs = usage.get('jobs') or []
         jobs.append(job_id)
         usage['jobs'] = jobs[-200:]
         save_guest_usage(quota_key, usage)
-        return True, max(0, GUEST_DAILY_LIMIT - usage['count'])
+        global_usage['count'] = global_count + 1
+        global_jobs = global_usage.get('jobs') or []
+        global_jobs.append(job_id)
+        global_usage['jobs'] = global_jobs[-1000:]
+        save_guest_global_usage(global_usage)
+        return True, max(0, GUEST_DAILY_LIMIT - usage['count']), max(0, GUEST_GLOBAL_DAILY_LIMIT - global_usage['count']), ''
 
 
 def guest_quota_remaining(quota_key):
@@ -835,8 +868,37 @@ def guest_quota_remaining(quota_key):
     return max(0, GUEST_DAILY_LIMIT - int(usage.get('count') or 0))
 
 
+def guest_global_quota_remaining():
+    usage = load_guest_global_usage()
+    return max(0, GUEST_GLOBAL_DAILY_LIMIT - int(usage.get('count') or 0))
+
+
 def stable_hash(value):
     return hashlib.sha256((SESSION_SECRET + ':' + value).encode('utf-8')).hexdigest()[:32]
+
+
+def today_key():
+    return datetime.now().strftime('%Y%m%d')
+
+
+def guest_usage_summary(day=None):
+    day = day or today_key()
+    rows = []
+    for p in GUEST_USAGE.glob(f'{day}-*.json'):
+        key = p.stem[len(day) + 1:]
+        if key == 'global':
+            continue
+        try:
+            usage = json.loads(p.read_text(encoding='utf-8'))
+        except Exception:
+            continue
+        rows.append({
+            'key': key,
+            'count': int(usage.get('count') or 0),
+            'jobs': usage.get('jobs') or [],
+            'mtime': p.stat().st_mtime,
+        })
+    return sorted(rows, key=lambda x: (x['count'], x['mtime']), reverse=True)
 
 
 def role_can_access_job(role, subject, job):
@@ -876,33 +938,22 @@ def task_rows_html(role, subject):
     return ''.join(rows) if rows else '<tr><td colspan="5" class="empty">还没有任务，提交一个试试吧</td></tr>'
 
 
-def login_page(error=''):
+def admin_login_page(error=''):
     error_html = f'<section class="card error-card"><p>{html.escape(error)}</p></section>' if error else ''
-    guest_html = ''
-    if GUEST_ENABLED:
-        guest_html = (
-            '<section class="card">'
-            '<h2>游客体验</h2>'
-            f'<p class="note">游客每天可以体验 {GUEST_DAILY_LIMIT} 次真实转存和下载，只能看到自己的临时任务。</p>'
-            f'<form method="post" action="{app_url("/guest")}"><button class="secondary" type="submit">临时体验</button></form>'
-            '</section>'
-        )
     body = (
         '<header class="hero">'
-        '<h1>OpenList Share Bridge</h1>'
-        '<p>登录后粘贴百度网盘分享链接，临时转存并下载。</p>'
+        '<h1>管理员登录</h1>'
+        '<p>查看公益转存额度、用户使用统计和后台任务。</p>'
         '</header>'
         f'{error_html}'
         '<section class="card">'
-        '<h2>管理员登录</h2>'
-        f'<form method="post" action="{app_url("/login")}">'
+        f'<form method="post" action="{app_url("/admin/login")}">'
         '<div class="form-row"><input type="password" name="password" placeholder="管理员密码"></div>'
         '<div class="row-actions"><button type="submit">登录</button></div>'
         '</form>'
         '</section>'
-        f'{guest_html}'
     )
-    return render_page('登录 · OpenList Share Bridge', body)
+    return render_page('管理员登录 · OpenList Share Bridge', body)
 
 
 def bridge_home_page(role, subject, submitted='', quota_key=''):
@@ -911,10 +962,17 @@ def bridge_home_page(role, subject, submitted='', quota_key=''):
     token_q = ''
     is_guest = role == 'guest'
     quota = guest_quota_remaining(quota_key) if is_guest else None
+    global_quota = guest_global_quota_remaining()
     rows_html = task_rows_html(role, subject)
     guest_note = ''
     if is_guest:
-        guest_note = f'<section class="card"><h2>游客额度</h2><p class="note">今天还可以体验 <span id="guest-quota">{quota}</span> / {GUEST_DAILY_LIMIT} 次。游客任务只对当前浏览器会话可见。</p></section>'
+        guest_note = (
+            '<section class="card">'
+            '<h2>今日额度</h2>'
+            f'<p class="note">公益池今日剩余 <strong><span id="global-quota">{global_quota}</span> / {GUEST_GLOBAL_DAILY_LIMIT}</strong> 次；'
+            f'你今天还可以使用 <strong><span id="guest-quota">{quota}</span> / {GUEST_DAILY_LIMIT}</strong> 次。</p>'
+            '</section>'
+        )
     submitted_note = ''
     if submitted:
         submitted_note = (
@@ -934,6 +992,8 @@ def bridge_home_page(role, subject, submitted='', quota_key=''):
         'if(body)body.innerHTML=data.html;'
         'const quota=document.getElementById("guest-quota");'
         'if(quota&&data.quota!==null)quota.textContent=data.quota;'
+        'const globalQuota=document.getElementById("global-quota");'
+        'if(globalQuota&&data.global_quota!==null)globalQuota.textContent=data.global_quota;'
         '}catch(e){}'
         '}'
         'setInterval(refreshTasks,2000);'
@@ -943,9 +1003,8 @@ def bridge_home_page(role, subject, submitted='', quota_key=''):
     )
     body = (
         '<header class="hero">'
-        '<h1>Baidu → OpenList</h1>'
-        '<p>把百度网盘分享转存到临时目录，生成可直接下载的链接</p>'
-        '<p><a class="back" href="' + href('/logout') + '">退出登录</a></p>'
+        '<h1>公益转存</h1>'
+        '<p>粘贴百度网盘分享链接，临时转存，直接下载；完成后自动清理。</p>'
         '</header>'
         f'{guest_note}'
         f'{submitted_note}'
@@ -954,7 +1013,7 @@ def bridge_home_page(role, subject, submitted='', quota_key=''):
         '<div class="form-row"><textarea name="text" placeholder="粘贴百度分享链接，可包含提取码"></textarea></div>'
         '<div class="form-row"><input name="code" placeholder="提取码（留空自动识别）"></div>'
         '<div class="row-actions"><button type="submit">提交下载</button>'
-        '<span class="note">默认 24 小时后自动从百度网盘删除临时目录</span></div>'
+        '<span class="note">请只转存你有权访问的文件。临时资源会自动清理。</span></div>'
         '</form>'
         '<section class="card">'
         '<h2>最近任务</h2>'
@@ -979,6 +1038,45 @@ def guest_page(subject='', quota_key=''):
         '</section>'
     )
     return render_page('游客体验 · OpenList Share Bridge', body)
+
+
+def admin_dashboard_page():
+    global_usage = load_guest_global_usage()
+    global_count = int(global_usage.get('count') or 0)
+    user_rows = []
+    for item in guest_usage_summary()[:100]:
+        last_jobs = ', '.join(html.escape(x) for x in item['jobs'][-5:])
+        user_rows.append(
+            '<tr>'
+            f'<td class="mono">{html.escape(item["key"])}</td>'
+            f'<td>{item["count"]}</td>'
+            f'<td>{len(item["jobs"])}</td>'
+            f'<td class="mono">{last_jobs or "—"}</td>'
+            '</tr>'
+        )
+    users_html = ''.join(user_rows) if user_rows else '<tr><td colspan="4" class="empty">今天还没有游客使用记录</td></tr>'
+    body = (
+        '<header class="hero">'
+        '<h1>管理员后台</h1>'
+        '<p>查看公益转存今日额度和游客使用情况。</p>'
+        '<p><a class="back" href="' + app_url('/') + '">返回首页</a> · <a class="back" href="' + app_url('/logout') + '">退出登录</a></p>'
+        '</header>'
+        '<section class="card">'
+        '<h2>今日总额度</h2>'
+        f'<p class="note">今天已使用 <strong>{global_count}</strong> 次，剩余 <strong>{max(0, GUEST_GLOBAL_DAILY_LIMIT - global_count)}</strong> / {GUEST_GLOBAL_DAILY_LIMIT} 次。</p>'
+        '</section>'
+        '<section class="card">'
+        '<h2>游客使用排行</h2>'
+        '<table><thead><tr><th>用户指纹</th><th>使用次数</th><th>任务数</th><th>最近任务</th></tr></thead>'
+        f'<tbody>{users_html}</tbody></table>'
+        '</section>'
+        '<section class="card">'
+        '<h2>全部任务</h2>'
+        '<table><thead><tr><th>任务</th><th>状态</th><th>进度</th><th>创建时间</th><th>操作</th></tr></thead>'
+        f'<tbody>{task_rows_html("admin", "")}</tbody></table>'
+        '</section>'
+    )
+    return render_page('管理员后台 · OpenList Share Bridge', body)
 
 
 def fmt_time(iso):
@@ -1075,28 +1173,45 @@ class Handler(BaseHTTPRequestHandler):
         def href(target):
             return (BASE_PATH or '') + target
         if path == '/login':
-            self.send_html(login_page()); return
+            self.redirect_to('/admin/login'); return
+        if path == '/admin/login':
+            self.send_html(admin_login_page()); return
+        if path == '/admin':
+            role, _ = self.current_session()
+            if role != 'admin':
+                self.redirect_to('/admin/login'); return
+            self.send_html(admin_dashboard_page()); return
         if path == '/guest' and GUEST_ENABLED:
             role, subject = self.current_session()
             if role != 'guest':
-                self.redirect_to('/login'); return
+                self.redirect_to('/'); return
             self.send_html(guest_page(subject, self.guest_quota_key())); return
         if path == '/logout':
             self.send_response(303)
             self.clear_session()
-            self.send_header('Location', href('/login'))
+            self.send_header('Location', href('/'))
             self.end_headers()
             return
         role, subject = self.current_session()
-        if role != 'admin':
-            if role != 'guest':
-                self.send_html(login_page(), 401); return
         if path == '/':
+            if role not in ('guest', 'admin'):
+                self.send_response(303)
+                guest_id = secrets.token_urlsafe(18)
+                self.set_session('guest', 24 * 3600, guest_id)
+                self.send_header('Location', href('/'))
+                self.end_headers()
+                return
+            if role == 'admin':
+                subject = ''
             submitted = parse_qs(parsed.query).get('submitted', [''])[0]
-            self.send_html(bridge_home_page(role, subject, submitted, self.guest_quota_key()))
+            self.send_html(bridge_home_page(role if role == 'guest' else 'guest', subject, submitted, self.guest_quota_key()))
         elif path == '/tasks':
-            quota = guest_quota_remaining(self.guest_quota_key()) if role == 'guest' else None
-            self.send_json({'html': task_rows_html(role, subject), 'quota': quota})
+            if role not in ('guest', 'admin'):
+                self.send_json({'html': '<tr><td colspan="5" class="empty">请刷新页面开始使用</td></tr>', 'quota': None, 'global_quota': guest_global_quota_remaining()}, 401); return
+            public_role = 'guest'
+            public_subject = subject if role == 'guest' else ''
+            quota = guest_quota_remaining(self.guest_quota_key())
+            self.send_json({'html': task_rows_html(public_role, public_subject), 'quota': quota, 'global_quota': guest_global_quota_remaining()})
         elif path.startswith('/progress/'):
             jid = path.rsplit('/', 1)[-1]
             try:
@@ -1332,14 +1447,16 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get('Content-Length', 0))
         data = parse_qs(self.rfile.read(length).decode('utf-8', errors='replace'))
         if path == '/login':
+            self.redirect_to('/admin/login'); return
+        if path == '/admin/login':
             password = data.get('password', [''])[0]
             if ADMIN_PASSWORD and hmac.compare_digest(password, ADMIN_PASSWORD):
                 self.send_response(303)
                 self.set_session('admin', 7 * 86400)
-                self.send_header('Location', (BASE_PATH or '') + '/')
+                self.send_header('Location', (BASE_PATH or '') + '/admin')
                 self.end_headers()
                 return
-            self.send_html(login_page('密码不正确'), 401)
+            self.send_html(admin_login_page('密码不正确'), 401)
             return
         if path == '/guest' and GUEST_ENABLED:
             self.send_response(303)
@@ -1350,7 +1467,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         role, subject = self.current_session()
         if role not in ('admin', 'guest'):
-            self.send_html(login_page(), 401); return
+            self.redirect_to('/'); return
         if path != '/submit':
             self.send_html('not found', 404); return
         if role == 'guest':
@@ -1366,11 +1483,17 @@ class Handler(BaseHTTPRequestHandler):
         jid = uuid.uuid4().hex[:12]
         if role == 'guest':
             quota_key = self.guest_quota_key()
-            allowed, remaining = consume_guest_quota(quota_key, jid)
+            allowed, remaining, global_remaining, limit_reason = consume_guest_quota(quota_key, jid)
             if not allowed:
+                title = '今日公益额度已用完' if limit_reason == 'global' else '你的今日次数已用完'
+                message = (
+                    f'公益池今天最多可转存 {GUEST_GLOBAL_DAILY_LIMIT} 次，请明天再来。'
+                    if limit_reason == 'global'
+                    else f'每个用户每天最多可以体验 {GUEST_DAILY_LIMIT} 次，请明天再来。'
+                )
                 body = (
-                    '<header class="hero"><h1>今日体验次数已用完</h1>'
-                    f'<p>游客每天最多可以体验 {GUEST_DAILY_LIMIT} 次，请明天再来，或联系站点管理员。</p></header>'
+                    f'<header class="hero"><h1>{title}</h1>'
+                    f'<p>{message}</p></header>'
                     f'<section class="card"><a class="btn secondary" href="{app_url("/")}">返回</a></section>'
                 )
                 self.send_html(render_page('游客额度已用完', body), 429); return
@@ -1388,6 +1511,7 @@ class Handler(BaseHTTPRequestHandler):
         }
         if role == 'guest':
             job['guest_remaining_today'] = remaining
+            job['guest_global_remaining_today'] = global_remaining
             job['guest_quota_key'] = quota_key
         save_job(job)
         q.put(jid)

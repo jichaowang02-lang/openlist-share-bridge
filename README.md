@@ -134,6 +134,7 @@ BAIDU_OPENLIST_ADMIN_PASSWORD=change-this-admin-password
 BAIDU_OPENLIST_SESSION_SECRET=change-this-random-session-secret
 BAIDU_OPENLIST_GUEST_ENABLED=1
 BAIDU_OPENLIST_GUEST_DAILY_LIMIT=3
+BAIDU_OPENLIST_GUEST_GLOBAL_DAILY_LIMIT=100
 BAIDU_OPENLIST_BASE_PATH=/baidu
 GODEBUG=http2client=0,netdns=cgo+1
 BAIDU_OPENLIST_FORCE_IPV4=1
@@ -160,7 +161,9 @@ Login notes:
 - `BAIDU_OPENLIST_SESSION_SECRET` signs browser session cookies. Use a long random value.
 - `BAIDU_OPENLIST_GUEST_ENABLED=1` enables guest access.
 - `BAIDU_OPENLIST_GUEST_DAILY_LIMIT=3` lets each guest client fingerprint submit up to 3 real transfer/download tasks per day.
+- `BAIDU_OPENLIST_GUEST_GLOBAL_DAILY_LIMIT=100` limits all guests combined to 100 transfer tasks per day.
 - Guests can only see their own tasks. Admins can see all tasks.
+- The public homepage is the guest charity-transfer page. Admin login is at `/baidu/admin/login`.
 
 ## Nginx and HTTPS
 

@@ -134,6 +134,7 @@ BAIDU_OPENLIST_ADMIN_PASSWORD=change-this-admin-password
 BAIDU_OPENLIST_SESSION_SECRET=change-this-random-session-secret
 BAIDU_OPENLIST_GUEST_ENABLED=1
 BAIDU_OPENLIST_GUEST_DAILY_LIMIT=3
+BAIDU_OPENLIST_GUEST_GLOBAL_DAILY_LIMIT=100
 BAIDU_OPENLIST_BASE_PATH=/baidu
 GODEBUG=http2client=0,netdns=cgo+1
 BAIDU_OPENLIST_FORCE_IPV4=1
@@ -160,7 +161,9 @@ BAIDU_OPENLIST_PAGE_SIZE=200
 - `BAIDU_OPENLIST_SESSION_SECRET` 用来签名浏览器会话 Cookie，建议使用随机长字符串。
 - `BAIDU_OPENLIST_GUEST_ENABLED=1` 开启游客访问。
 - `BAIDU_OPENLIST_GUEST_DAILY_LIMIT=3` 表示每个游客客户端指纹每天最多提交 3 个真实转存/下载任务。
+- `BAIDU_OPENLIST_GUEST_GLOBAL_DAILY_LIMIT=100` 表示所有游客当天最多总共提交 100 个转存任务。
 - 游客只能看到自己的任务，管理员可以看到所有任务。
+- 公开首页是公益转存页；管理员入口是 `/baidu/admin/login`。
 
 ## Nginx 和 HTTPS
 
