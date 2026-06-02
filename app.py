@@ -688,6 +688,14 @@ th { font-weight: 600; color: var(--text-muted); font-size: 12px; text-transform
 tr:last-child td { border-bottom: 0; }
 td a { color: var(--accent); text-decoration: none; }
 td a:hover { text-decoration: underline; }
+.table-wrap { overflow-x: auto; }
+.admin-table { table-layout: fixed; }
+.admin-table th:nth-child(1), .admin-table td:nth-child(1) { width: 130px; }
+.admin-table th:nth-child(2), .admin-table td:nth-child(2) { width: 90px; }
+.admin-table th:nth-child(3), .admin-table td:nth-child(3) { width: 150px; }
+.admin-table th:nth-child(4), .admin-table td:nth-child(4) { width: 150px; }
+.admin-table th:nth-child(5), .admin-table td:nth-child(5) { width: 120px; }
+.truncate { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
 .mono { font-family: "SF Mono", ui-monospace, "Cascadia Code", Menlo, Consolas, monospace; font-size: 13px; }
 .badge {
   display: inline-block; padding: 3px 10px; border-radius: 980px;
@@ -985,6 +993,36 @@ def task_rows_html(role, subject):
     return ''.join(rows) if rows else '<tr><td colspan="5" class="empty">还没有任务，提交一个试试吧</td></tr>'
 
 
+def admin_task_rows_html():
+    rows = []
+    for jf in sorted(JOBS.glob('*.json'), key=lambda p: p.stat().st_mtime, reverse=True)[:80]:
+        try:
+            job = json.loads(jf.read_text(encoding='utf-8'))
+        except Exception:
+            continue
+        jid = html.escape(job.get('id', jf.stem))
+        status = html.escape(job.get('status') or '—')
+        owner = job.get('owner_role') or 'legacy'
+        if owner == 'guest':
+            owner = '游客'
+        elif owner == 'admin':
+            owner = '管理员'
+        cleanup = '已清理' if job.get('remote_kept') is False else ('待清理' if job.get('remote_kept') else '—')
+        err = str(job.get('error') or job.get('cleanup_error') or '')
+        err_html = f'<span class="truncate" title="{html.escape(err)}">{html.escape(err[:160])}</span>' if err else '—'
+        rows.append(
+            '<tr>'
+            f'<td><a class="mono" href="{app_url("/job/" + jid)}">{jid}</a></td>'
+            f'<td>{html.escape(owner)}</td>'
+            f'<td><span class="badge {status}">{status}</span></td>'
+            f'<td class="mono">{html.escape(fmt_time(job.get("created_at","")))}</td>'
+            f'<td>{cleanup}</td>'
+            f'<td>{err_html}</td>'
+            '</tr>'
+        )
+    return ''.join(rows) if rows else '<tr><td colspan="6" class="empty">还没有任务</td></tr>'
+
+
 def admin_login_page(error=''):
     error_html = f'<section class="card error-card"><p>{html.escape(error)}</p></section>' if error else ''
     body = (
@@ -1126,8 +1164,8 @@ def admin_dashboard_page():
         '</section>'
         '<section class="card">'
         '<h2>全部任务</h2>'
-        '<table><thead><tr><th>任务</th><th>状态</th><th>进度</th><th>创建时间</th><th>操作</th></tr></thead>'
-        f'<tbody>{task_rows_html("admin", "")}</tbody></table>'
+        '<div class="table-wrap"><table class="admin-table"><thead><tr><th>任务</th><th>来源</th><th>状态</th><th>创建时间</th><th>清理</th><th>错误摘要</th></tr></thead>'
+        f'<tbody>{admin_task_rows_html()}</tbody></table></div>'
         '</section>'
     )
     return render_page('管理员后台 · OpenList Share Bridge', body)
