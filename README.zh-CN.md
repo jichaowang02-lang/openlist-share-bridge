@@ -152,6 +152,7 @@ BAIDU_OPENLIST_SITE_URL=https://drive.example.com/openlist
 BAIDU_OPENLIST_ADMIN_TOKEN=change-this-openlist-admin-token
 BAIDU_OPENLIST_API=http://127.0.0.1:5244/openlist
 BAIDU_OPENLIST_MAX_SERVER_ZIP_BYTES=16106127360
+BAIDU_OPENLIST_WORKER_COUNT=1
 BAIDU_OPENLIST_PAGE_SIZE=200
 ```
 
@@ -174,6 +175,7 @@ BAIDU_OPENLIST_PAGE_SIZE=200
 - `BAIDU_OPENLIST_GUEST_MAX_SINGLE_FILE_BYTES=10737418240` 表示游客默认只能提交 10 GiB 以内的单个文件；游客文件夹分享会被拒绝并自动清理。
 - `BAIDU_OPENLIST_GUEST_COOLDOWN_SECONDS=60` 表示同一游客指纹两次提交之间需要等待 60 秒。
 - `BAIDU_OPENLIST_GUEST_MAX_ACTIVE_TASKS=2` 和 `BAIDU_OPENLIST_GUEST_MAX_ACTIVE_TASKS_PER_USER=1` 用来限制游客全站并发和单指纹并发。
+- `BAIDU_OPENLIST_WORKER_COUNT=1` 控制同时处理几个转存任务，超出的任务会进入排队。
 - 游客只能看到自己的任务，管理员可以看到所有任务。
 - 公开首页是公益转存页；管理员入口是 `/baidu/admin/login`。
 - 管理员可以在后台直接修改长期生效的每日全站总额度，也可以封禁/解封游客指纹，不需要重启服务。

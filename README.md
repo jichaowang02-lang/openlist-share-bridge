@@ -152,6 +152,7 @@ BAIDU_OPENLIST_SITE_URL=https://drive.example.com/openlist
 BAIDU_OPENLIST_ADMIN_TOKEN=change-this-openlist-admin-token
 BAIDU_OPENLIST_API=http://127.0.0.1:5244/openlist
 BAIDU_OPENLIST_MAX_SERVER_ZIP_BYTES=16106127360
+BAIDU_OPENLIST_WORKER_COUNT=1
 BAIDU_OPENLIST_PAGE_SIZE=200
 ```
 
@@ -174,6 +175,7 @@ Login notes:
 - `BAIDU_OPENLIST_GUEST_MAX_SINGLE_FILE_BYTES=10737418240` limits guest submissions to one file up to 10 GiB by default. Guest folder shares are rejected and cleaned up automatically.
 - `BAIDU_OPENLIST_GUEST_COOLDOWN_SECONDS=60` adds a per-fingerprint submit cooldown.
 - `BAIDU_OPENLIST_GUEST_MAX_ACTIVE_TASKS=2` and `BAIDU_OPENLIST_GUEST_MAX_ACTIVE_TASKS_PER_USER=1` limit concurrent guest work.
+- `BAIDU_OPENLIST_WORKER_COUNT=1` controls how many transfer jobs are processed at the same time; extra jobs wait in the queue.
 - Guests can only see their own tasks. Admins can see all tasks.
 - The public homepage is the guest charity-transfer page. Admin login is at `/baidu/admin/login`.
 - Admins can update the persistent daily global quota and ban/unban guest fingerprints from the admin dashboard without restarting the service.

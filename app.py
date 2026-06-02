@@ -63,6 +63,7 @@ OPENLIST_ADMIN_TOKEN = os.environ.get('BAIDU_OPENLIST_ADMIN_TOKEN', '')
 OPENLIST_PAGE_SIZE = int(os.environ.get('BAIDU_OPENLIST_PAGE_SIZE', '200'))
 ZIP_FREE_SPACE_BUFFER = int(os.environ.get('BAIDU_OPENLIST_ZIP_FREE_SPACE_BUFFER', str(2 * 1024 * 1024 * 1024)))
 MAX_SERVER_ZIP_BYTES = int(os.environ.get('BAIDU_OPENLIST_MAX_SERVER_ZIP_BYTES', str(15 * 1024 * 1024 * 1024)))
+WORKER_COUNT = max(1, int(os.environ.get('BAIDU_OPENLIST_WORKER_COUNT', '1')))
 
 for p in (DOWNLOADS, JOBS, LOGS, ZIP_CACHE, GUEST_USAGE):
     p.mkdir(parents=True, exist_ok=True)
@@ -1111,6 +1112,37 @@ def active_guest_task_counts(quota_key=''):
     return total, per_user
 
 
+def guest_queue_stats(quota_key=''):
+    queued = 0
+    running = 0
+    ahead = 0
+    seen_self = not quota_key
+    for jf in sorted(JOBS.glob('*.json'), key=lambda p: p.stat().st_mtime):
+        try:
+            job = json.loads(jf.read_text(encoding='utf-8'))
+        except Exception:
+            continue
+        if job.get('owner_role') != 'guest':
+            continue
+        status = job.get('status')
+        if status == 'running':
+            running += 1
+        elif status in ('queued', 'zipping'):
+            queued += 1
+            if quota_key and job.get('guest_quota_key') == quota_key:
+                seen_self = True
+            elif not seen_self:
+                ahead += 1
+    limit = WORKER_COUNT
+    return {
+        'running': running,
+        'queued': queued,
+        'ahead': ahead,
+        'limit': limit,
+        'available': max(0, limit - running),
+    }
+
+
 def guest_cooldown_remaining(quota_key):
     if GUEST_COOLDOWN_SECONDS <= 0:
         return 0
@@ -1229,6 +1261,7 @@ def bridge_home_page(role, subject, submitted='', quota_key=''):
     quota = guest_quota_remaining(quota_key) if is_guest else None
     global_quota = guest_global_quota_remaining()
     global_limit = guest_global_daily_limit()
+    queue_stats = guest_queue_stats(quota_key)
     rows_html = task_rows_html(role, subject)
     guest_note = ''
     if is_guest:
@@ -1237,6 +1270,9 @@ def bridge_home_page(role, subject, submitted='', quota_key=''):
             '<h2>今日额度</h2>'
             f'<p class="note">公益池今日剩余 <strong><span id="global-quota">{global_quota}</span> / <span id="global-limit">{global_limit}</span></strong> 次；'
             f'你今天还可以使用 <strong><span id="guest-quota">{quota}</span> / {GUEST_DAILY_LIMIT}</strong> 次。</p>'
+            f'<p class="note">当前处理 <strong><span id="busy-slots">{queue_stats["running"]}</span> / <span id="busy-limit">{queue_stats["limit"]}</span></strong>；'
+            f'排队中 <strong><span id="queue-size">{queue_stats["queued"]}</span></strong> 个任务；'
+            f'你前面还有 <strong><span id="queue-ahead">{queue_stats["ahead"]}</span></strong> 个任务。</p>'
             '</section>'
         )
     submitted_note = ''
@@ -1260,6 +1296,14 @@ def bridge_home_page(role, subject, submitted='', quota_key=''):
         'if(quota&&data.quota!==null)quota.textContent=data.quota;'
         'const globalQuota=document.getElementById("global-quota");'
         'if(globalQuota&&data.global_quota!==null)globalQuota.textContent=data.global_quota;'
+        'const busySlots=document.getElementById("busy-slots");'
+        'if(busySlots&&data.queue)busySlots.textContent=data.queue.running;'
+        'const busyLimit=document.getElementById("busy-limit");'
+        'if(busyLimit&&data.queue)busyLimit.textContent=data.queue.limit;'
+        'const queueSize=document.getElementById("queue-size");'
+        'if(queueSize&&data.queue)queueSize.textContent=data.queue.queued;'
+        'const queueAhead=document.getElementById("queue-ahead");'
+        'if(queueAhead&&data.queue)queueAhead.textContent=data.queue.ahead;'
         '}catch(e){}'
         '}'
         'setInterval(refreshTasks,2000);'
@@ -1496,8 +1540,14 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({'html': '<tr><td colspan="5" class="empty">请刷新页面开始使用</td></tr>', 'quota': None, 'global_quota': guest_global_quota_remaining()}, 401); return
             public_role = 'guest'
             public_subject = subject if role == 'guest' else ''
-            quota = guest_quota_remaining(self.guest_quota_key())
-            self.send_json({'html': task_rows_html(public_role, public_subject), 'quota': quota, 'global_quota': guest_global_quota_remaining()})
+            quota_key = self.guest_quota_key()
+            quota = guest_quota_remaining(quota_key)
+            self.send_json({
+                'html': task_rows_html(public_role, public_subject),
+                'quota': quota,
+                'global_quota': guest_global_quota_remaining(),
+                'queue': guest_queue_stats(quota_key),
+            })
         elif path.startswith('/progress/'):
             jid = path.rsplit('/', 1)[-1]
             try:
@@ -1823,17 +1873,10 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 self.send_html(render_page('提交冷却中', body), 429); return
             active_total, active_user = active_guest_task_counts(quota_key)
-            if GUEST_MAX_ACTIVE_TASKS and active_total >= GUEST_MAX_ACTIVE_TASKS:
-                body = (
-                    '<header class="hero"><h1>公益池正在忙</h1>'
-                    f'<p>当前游客任务并发已达到 {GUEST_MAX_ACTIVE_TASKS} 个，请稍后再试。</p></header>'
-                    f'<section class="card"><a class="btn secondary" href="{app_url("/")}">返回</a></section>'
-                )
-                self.send_html(render_page('公益池忙碌', body), 429); return
             if GUEST_MAX_ACTIVE_TASKS_PER_USER and active_user >= GUEST_MAX_ACTIVE_TASKS_PER_USER:
                 body = (
                     '<header class="hero"><h1>已有任务在进行</h1>'
-                    f'<p>每个游客同时最多 {GUEST_MAX_ACTIVE_TASKS_PER_USER} 个任务，请等当前任务下载或清理后再提交。</p></header>'
+                    f'<p>每个游客同时最多 {GUEST_MAX_ACTIVE_TASKS_PER_USER} 个未完成任务。当前任务会自动排队和刷新，请等它完成后再提交新的链接。</p></header>'
                     f'<section class="card"><a class="btn secondary" href="{app_url("/")}">返回</a></section>'
                 )
                 self.send_html(render_page('任务并发受限', body), 429); return
@@ -1875,7 +1918,8 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == '__main__':
-    threading.Thread(target=worker, daemon=True).start()
+    for _ in range(WORKER_COUNT):
+        threading.Thread(target=worker, daemon=True).start()
     threading.Thread(target=zip_worker, daemon=True).start()
     threading.Thread(target=janitor, daemon=True).start()
     ThreadingHTTPServer(('0.0.0.0', PORT), Handler).serve_forever()
