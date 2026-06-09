@@ -175,6 +175,40 @@ def openlist_remove_path(openlist_path):
     return data
 
 
+def cleanup_orphan_remote_dirs():
+    if not OPENLIST_ADMIN_TOKEN:
+        return
+    protected = set()
+    for jf in JOBS.glob('*.json'):
+        try:
+            job = json.loads(jf.read_text(encoding='utf-8'))
+        except Exception:
+            continue
+        remote = job.get('remote_dir') or ''
+        if remote.startswith(REMOTE_ROOT + '/') and job.get('status') in ('queued', 'running', 'transferred', 'ready', 'zipping', 'zip_ready'):
+            protected.add(remote.rsplit('/', 1)[-1])
+    try:
+        items, _ = openlist_list(OPENLIST_BAIDU_MOUNT.rstrip('/') + REMOTE_ROOT, page=1, refresh=True)
+    except Exception:
+        return
+    stale_names = []
+    for item in items:
+        name = item.get('name') or ''
+        if item.get('is_dir') and re.fullmatch(r'[0-9a-f]{12}', name) and name not in protected:
+            stale_names.append(name)
+    if not stale_names:
+        return
+    resp = requests.post(
+        OPENLIST_API.rstrip('/') + '/api/fs/remove',
+        headers={'Authorization': OPENLIST_ADMIN_TOKEN, 'Content-Type': 'application/json'},
+        json={'dir': OPENLIST_BAIDU_MOUNT.rstrip('/') + REMOTE_ROOT, 'names': stale_names},
+        timeout=60,
+    )
+    data = resp.json()
+    if data.get('code') != 200:
+        raise RuntimeError('OpenList 清理孤儿目录失败: ' + json.dumps(data, ensure_ascii=False))
+
+
 def run_cmd_retry(job, args, attempts=3, delay=2, timeout=None):
     last_error = None
     for attempt in range(1, attempts + 1):
@@ -478,13 +512,14 @@ def worker():
             out_dir = DOWNLOADS / job_id
             out_dir.mkdir(parents=True, exist_ok=True)
             remote_dir = f'{REMOTE_ROOT}/{job_id}'
+            job['remote_dir'] = remote_dir
+            save_job(job)
             share = job['share_url']
             code = job.get('code') or ''
 
             run_cmd_retry(job, [str(BIN), 'mkdir', remote_dir], attempts=4, delay=3, timeout=45)
             update_progress(job_id, active=True, phase='正在转存百度分享', current_file=share)
             web_transfer(job, remote_dir)
-            job['remote_dir'] = remote_dir
             job['status'] = 'transferred'
             save_job(job)
             openlist_path = OPENLIST_BAIDU_MOUNT.rstrip('/') + remote_dir
@@ -755,6 +790,10 @@ def janitor():
                         save_job(job)
                 except Exception:
                     continue
+            try:
+                cleanup_orphan_remote_dirs()
+            except Exception:
+                pass
         finally:
             time.sleep(1800)
 
@@ -2001,6 +2040,10 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == '__main__':
     recover_jobs_on_startup()
+    try:
+        cleanup_orphan_remote_dirs()
+    except Exception:
+        pass
     for _ in range(WORKER_COUNT):
         threading.Thread(target=worker, daemon=True).start()
     threading.Thread(target=zip_worker, daemon=True).start()
