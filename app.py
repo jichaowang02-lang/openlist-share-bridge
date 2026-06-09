@@ -88,6 +88,15 @@ def safe_share(text):
     return m.group(0) if m else text
 
 
+def ascii_url(url):
+    parts = urllib.parse.urlsplit(url.strip())
+    netloc = parts.netloc.encode('idna').decode('ascii') if parts.netloc else ''
+    path = urllib.parse.quote(urllib.parse.unquote(parts.path), safe='/%:@')
+    query = urllib.parse.quote(urllib.parse.unquote(parts.query), safe='=&%:/?+,-._~')
+    fragment = urllib.parse.quote(urllib.parse.unquote(parts.fragment), safe='=&%:/?+,-._~')
+    return urllib.parse.urlunsplit((parts.scheme, netloc, path, query, fragment))
+
+
 def extract_code(text):
     patterns = [r'(?:提取码|访问码|密码)[:：\s]*([A-Za-z0-9]{4})', r'(?:pwd|pass|code)=([A-Za-z0-9]{4})']
     for pat in patterns:
@@ -354,6 +363,13 @@ def has_enough_zip_space(required_bytes):
 
 def share_surl(share_url):
     m = re.search(r'/s/1([^?/#]+)', share_url)
+    if m:
+        return m.group(1)
+    qs = parse_qs(urlparse(share_url).query)
+    surl = qs.get('surl', [''])[0]
+    if surl:
+        return surl[1:] if surl.startswith('1') else surl
+    m = re.search(r'(?:^|[?&])surl=1?([^&#]+)', share_url)
     if not m:
         raise RuntimeError('无法识别百度分享 surl')
     return m.group(1)
@@ -366,6 +382,9 @@ def web_transfer(job, remote_dir):
     share = job['share_url']
     code = job.get('code') or ''
     surl = share_surl(share)
+    share_request_url = ascii_url(share)
+    share_referer = share_request_url
+    init_referer = 'https://pan.baidu.com/share/init?surl=' + urllib.parse.quote(surl, safe='')
     session = requests.Session()
     session.headers.update({
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/143 Safari/537.36',
@@ -377,7 +396,7 @@ def web_transfer(job, remote_dir):
         'https://pan.baidu.com/share/verify',
         params={'surl': surl, 't': str(int(time.time() * 1000)), 'channel': 'chunlei', 'web': '1', 'app_id': '250528', 'clienttype': '0'},
         data={'pwd': code, 'vcode': '', 'vcode_str': ''},
-        headers={'Referer': share},
+        headers={'Referer': share_referer},
         timeout=25,
     )
     try:
@@ -387,7 +406,7 @@ def web_transfer(job, remote_dir):
     if verify_data.get('errno') not in (0, '0'):
         raise RuntimeError('分享校验失败: ' + json.dumps(verify_data, ensure_ascii=False))
     sekey = urllib.parse.unquote(verify_data.get('randsk', ''))
-    page = session.get(share, headers={'Referer': 'https://pan.baidu.com/share/init?surl=' + surl}, timeout=25)
+    page = session.get(share_request_url, headers={'Referer': init_referer}, timeout=25)
     text = page.text
     if '/login?' in page.url:
         raise RuntimeError('浏览器 Cookie 已失效，需要重新复制 Cookie')
@@ -404,7 +423,7 @@ def web_transfer(job, remote_dir):
         'https://pan.baidu.com/share/transfer',
         params={'shareid': shareid, 'from': share_uk, 'sekey': sekey, 'ondup': 'newcopy', 'async': '1', 'channel': 'chunlei', 'web': '1', 'app_id': '250528', 'bdstoken': '', 'clienttype': '0'},
         data={'fsidlist': json.dumps(fsids), 'path': remote_dir},
-        headers={'Referer': share, 'Origin': 'https://pan.baidu.com'},
+        headers={'Referer': share_referer, 'Origin': 'https://pan.baidu.com'},
         timeout=40,
     )
     try:
