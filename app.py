@@ -345,6 +345,18 @@ def openlist_get(openlist_path, refresh=True):
     return data.get('data') or {}
 
 
+def openlist_get_retry(openlist_path, attempts=5, delay=2):
+    last_error = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return openlist_get(openlist_path, refresh=True)
+        except Exception as e:
+            last_error = e
+            if attempt < attempts:
+                time.sleep(delay)
+    raise last_error
+
+
 def file_size_label(size):
     size = int(size or 0)
     units = ['B', 'KB', 'MB', 'GB', 'TB']
@@ -373,6 +385,18 @@ def share_surl(share_url):
     if not m:
         raise RuntimeError('无法识别百度分享 surl')
     return m.group(1)
+
+
+def share_fsids(share_url, page_text):
+    qs = parse_qs(urlparse(share_url).query)
+    fsids = []
+    for key in ('fid', 'fsid'):
+        for value in qs.get(key, []):
+            if str(value).isdigit():
+                fsids.append(int(value))
+    if fsids:
+        return fsids
+    return [int(x) for x in re.findall(r'"fs_id"\s*:\s*"?([^",}]+)', page_text) if str(x).isdigit()]
 
 
 def web_transfer(job, remote_dir):
@@ -415,7 +439,7 @@ def web_transfer(job, remote_dir):
         return m.group(1).strip('"') if m else ''
     shareid = pick('shareid')
     share_uk = pick('share_uk')
-    fsids = [int(x) for x in re.findall(r'"fs_id"\s*:\s*"?([^",}]+)', text)]
+    fsids = share_fsids(share, text)
     if not (shareid and share_uk and fsids):
         raise RuntimeError('无法解析分享文件元数据')
     append_log(job, f'网页接口解析成功: shareid={shareid}, share_uk={share_uk}, fsids={fsids[:10]}')
@@ -587,7 +611,7 @@ def assert_guest_transfer_allowed(job):
     if len(paths) != 1:
         raise RuntimeError('游客模式只允许转存单个文件，暂不支持文件夹或多个文件。')
     openlist_path = OPENLIST_BAIDU_MOUNT.rstrip('/') + paths[0]
-    info = openlist_get(openlist_path, refresh=True)
+    info = openlist_get_retry(openlist_path)
     if info.get('is_dir'):
         raise RuntimeError('游客模式只允许单文件下载，文件夹请使用管理员模式或拆成单个文件。')
     size = int(info.get('size') or 0)
@@ -733,6 +757,45 @@ def janitor():
                     continue
         finally:
             time.sleep(1800)
+
+
+def recover_jobs_on_startup():
+    cutoff = time.time()
+    for jf in JOBS.glob('*.json'):
+        try:
+            job = json.loads(jf.read_text(encoding='utf-8'))
+            status = job.get('status')
+            created_at = job.get('created_at') or ''
+            try:
+                age = cutoff - datetime.fromisoformat(created_at).timestamp()
+            except Exception:
+                age = 0
+            if status == 'queued':
+                if age > 1800:
+                    job['status'] = 'failed'
+                    job['finished_at'] = now()
+                    job['error'] = job.get('error') or '排队任务在服务重启后超时，已自动释放。'
+                    progress = job.get('download_progress') or {}
+                    progress.update({'active': False, 'phase': '排队超时释放', 'updated_at': now()})
+                    job['download_progress'] = progress
+                    save_job(job)
+                    append_log(job, '排队任务在服务启动时超时释放')
+                else:
+                    append_log(job, '服务重启后恢复排队任务')
+                    q.put(job['id'])
+            elif status in ('running', 'transferred', 'zipping'):
+                job['status'] = 'failed'
+                job['finished_at'] = now()
+                job['error'] = job.get('error') or '服务重启导致任务中断，请重新提交。'
+                progress = job.get('download_progress') or {}
+                progress.update({'active': False, 'phase': '服务重启中断', 'updated_at': now()})
+                job['download_progress'] = progress
+                save_job(job)
+                append_log(job, '服务重启时发现未完成任务，已标记失败并尝试清理')
+                if job.get('remote_dir'):
+                    delete_remote_temp(job, '服务重启清理未完成任务')
+        except Exception:
+            continue
 
 
 APPLE_CSS = """
@@ -1937,6 +2000,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == '__main__':
+    recover_jobs_on_startup()
     for _ in range(WORKER_COUNT):
         threading.Thread(target=worker, daemon=True).start()
     threading.Thread(target=zip_worker, daemon=True).start()
